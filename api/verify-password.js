@@ -12,6 +12,8 @@ export default function handler(req, res) {
   const expectedPassword = process.env.SITE_PASSWORD || 'password';
 
   if (password === expectedPassword) {
+    // Set cookie server-side for better reliability
+    res.setHeader('Set-Cookie', 'browser-review-auth=true; path=/; max-age=' + (60 * 60 * 24 * 7) + '; SameSite=Lax; HttpOnly');
     return res.status(200).json({ success: true });
   }
 

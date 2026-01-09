@@ -139,12 +139,19 @@ export default function middleware(request) {
       const response = await fetch('/api/verify-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password })
+        body: JSON.stringify({ password }),
+        credentials: 'include'
       });
       
       if (response.ok) {
-        document.cookie = 'browser-review-auth=true; path=/; max-age=' + (60 * 60 * 24 * 7) + '; SameSite=Lax';
-        window.location.href = '/';
+        // Set cookie with proper attributes
+        const cookieValue = 'browser-review-auth=true; path=/; max-age=' + (60 * 60 * 24 * 7) + '; SameSite=Lax; Secure';
+        document.cookie = cookieValue;
+        
+        // Small delay to ensure cookie is set, then reload
+        setTimeout(() => {
+          window.location.href = window.location.origin + '/';
+        }, 100);
       } else {
         errorDiv.classList.add('show');
         passwordInput.value = '';
