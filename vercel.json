@@ -2,8 +2,22 @@
   "version": 2,
   "builds": [
     {
+      "src": "middleware.js",
+      "use": "@vercel/node"
+    },
+    {
       "src": "web/index.html",
       "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/middleware.js",
+      "dest": "/middleware.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/middleware.js"
     }
   ],
   "rewrites": [

@@ -40,6 +40,21 @@ OPENAI_API_KEY=your_openai_api_key_here
 
 The tool will automatically detect and use the appropriate key. If no key is found, it will work in manual mode (descriptions must be provided manually).
 
+### Password Protection (Vercel Deployment)
+
+The web interface deployed on Vercel is protected with password authentication. To set a password:
+
+1. Go to your Vercel project: https://vercel.com/noteware/browser-review-tool/settings/environment-variables
+2. Add environment variable:
+   - **Name**: `SITE_PASSWORD`
+   - **Value**: Your desired password
+   - **Environment**: Production (and Preview if desired)
+3. Redeploy or wait for the next auto-deploy
+
+**Default password**: If `SITE_PASSWORD` is not set, it defaults to `password` (change this in production!)
+
+Users will see a password prompt when accessing the site. The password is stored in a cookie for 7 days.
+
 ### Web Interface & Deployment
 
 This project includes a web interface that can be deployed to Vercel or any static hosting service.
