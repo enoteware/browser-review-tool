@@ -6,18 +6,18 @@
       "use": "@vercel/static"
     }
   ],
-  "routes": [
+  "rewrites": [
     {
-      "src": "/",
-      "dest": "/web/index.html"
+      "source": "/",
+      "destination": "/web/index.html"
     },
     {
-      "src": "/browser-review",
-      "dest": "/web/index.html"
+      "source": "/browser-review",
+      "destination": "/web/index.html"
     },
     {
-      "src": "/init-project",
-      "dest": "/web/index.html"
+      "source": "/init-project",
+      "destination": "/web/index.html"
     }
   ],
   "headers": [
