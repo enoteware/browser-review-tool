@@ -27,6 +27,12 @@ export default function middleware(request) {
   const cookie = request.headers.get('cookie') || '';
   const isAuthenticated = cookie.includes('browser-review-auth=true');
 
+  // If authenticated, let request pass through (don't return anything)
+  if (isAuthenticated) {
+    return; // Let Vercel handle the request normally
+  }
+
+  // Not authenticated - show password prompt
   if (!isAuthenticated) {
     // Return password prompt page
     const html = `<!DOCTYPE html>
@@ -165,12 +171,9 @@ export default function middleware(request) {
     return new Response(html, {
       status: 401,
       headers: {
-        'Content-Type': 'text/html',
+        'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-cache, no-store, must-revalidate',
       },
     });
   }
-
-  // Authenticated - allow request to proceed
-  return new Response(null);
 }
