@@ -1,0 +1,88 @@
+{
+  "title": "Fix: Button Styling on Homepage",
+  "baseUrl": "http://localhost:7777",
+  "videoFormat": "gif",
+  "gifQuality": "medium",
+  "useAI": true,
+  "aiModel": "gpt-4o",
+  "maxScreenshotsPerStep": 10,
+  "clientRequest": "Update the homepage button styling to match the new design system",
+  "clientflowTaskUrl": "https://clientflow.example.com/tasks/123",
+  "description": "This review demonstrates the updated button styling on the homepage",
+  "steps": [
+    {
+      "name": "Homepage - Before Fix",
+      "url": "/",
+      "description": "AI-generated description will appear here if useAI is true",
+      "record": true,
+      "actions": [
+        {
+          "type": "screenshot",
+          "name": "homepage-before",
+          "fullPage": true
+        },
+        {
+          "type": "wait",
+          "ms": 2000
+        },
+        {
+          "type": "click",
+          "selector": "button[type='submit']",
+          "waitAfter": 1000
+        },
+        {
+          "type": "screenshot",
+          "name": "homepage-after-click"
+        }
+      ]
+    },
+    {
+      "name": "Form Interaction",
+      "url": "/contact",
+      "record": true,
+      "actions": [
+        {
+          "type": "screenshot",
+          "name": "form-initial"
+        },
+        {
+          "type": "type",
+          "selector": "input[name='email']",
+          "text": "test@example.com",
+          "waitAfter": 500
+        },
+        {
+          "type": "type",
+          "selector": "input[name='name']",
+          "text": "Test User",
+          "waitAfter": 500
+        },
+        {
+          "type": "screenshot",
+          "name": "form-filled"
+        },
+        {
+          "type": "click",
+          "selector": "button[type='submit']",
+          "waitAfter": 2000
+        },
+        {
+          "type": "screenshot",
+          "name": "form-submitted"
+        }
+      ]
+    },
+    {
+      "name": "Mobile View",
+      "url": "/",
+      "record": false,
+      "actions": [
+        {
+          "type": "screenshot",
+          "name": "mobile-view",
+          "fullPage": true
+        }
+      ]
+    }
+  ]
+}

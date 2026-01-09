@@ -1,0 +1,11 @@
+{
+  "commands": [
+    {
+      "name": "init-project",
+      "title": "Initialize Project",
+      "description": "Set up ignore files (.gitignore, .cursorignore) and project configuration",
+      "command": "node .cursor/commands/init-project.mjs",
+      "category": "setup"
+    }
+  ]
+}

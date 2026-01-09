@@ -1,0 +1,66 @@
+{
+  "name": "browser-review-tool",
+  "version": "1.0.0",
+  "description": "A tool for creating shareable HTML review reports with screenshots and GIF/video recordings",
+  "type": "module",
+  "main": "src/index.mjs",
+  "bin": {
+    "browser-review": "./src/index.mjs"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest --watch",
+    "lint": "eslint src/**/*.mjs",
+    "lint:fix": "eslint src/**/*.mjs --fix",
+    "format": "prettier --write \"src/**/*.{js,mjs,json,md}\"",
+    "format:check": "prettier --check \"src/**/*.{js,mjs,json,md}\"",
+    "dev": "node src/index.mjs",
+    "build": "npm run lint && npm run format:check && npm test",
+    "prepare": "npm run build",
+    "preversion": "npm run build",
+    "prepublishOnly": "npm run build",
+    "deploy:web": "vercel --prod",
+    "dev:web": "vercel dev",
+    "deploy:report": "cd review-reports && vercel --prod",
+    "share:report": "cd review-reports && vercel --prod"
+  },
+  "keywords": [
+    "browser",
+    "screenshot",
+    "recording",
+    "review",
+    "playwright",
+    "gif",
+    "video"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "src/",
+    "examples/",
+    "web/",
+    ".cursor/",
+    "api/",
+    "README.md",
+    "SETUP.md",
+    "LICENSE",
+    "PACKAGE_SUMMARY.md"
+  ],
+  "dependencies": {
+    "@playwright/test": "^1.54.1",
+    "@ai-sdk/openai": "^1.0.0",
+    "ai": "^3.4.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.17",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.2.5",
+    "vitest": "^1.3.1"
+  }
+}

@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Review reports (generated output)
+review-reports/
+
+# Environment files
+.env
+.env.local
+# But keep .env.example (template file)
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Playwright
+test-results/
+playwright-report/

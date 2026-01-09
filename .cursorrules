@@ -1,0 +1,17 @@
+# Project-specific Cursor rules
+
+# Context Awareness
+When adding features, always review the existing project context. Ensure all changes align with the project's current logic, architecture, and dependencies.
+
+# Code Style
+- Follow existing code style and patterns
+- Use consistent naming conventions
+- Add comments for complex logic
+
+# Testing
+- Write tests for new features
+- Ensure existing tests pass before submitting
+
+# Documentation
+- Update README.md for significant changes
+- Document complex functions and classes

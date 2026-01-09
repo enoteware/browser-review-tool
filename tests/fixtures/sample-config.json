@@ -1,0 +1,20 @@
+{
+  "title": "Sample Review Config",
+  "baseUrl": "http://localhost:3000",
+  "videoFormat": "gif",
+  "gifQuality": "medium",
+  "steps": [
+    {
+      "name": "Homepage Screenshot",
+      "url": "/",
+      "record": false,
+      "actions": [
+        {
+          "type": "screenshot",
+          "name": "homepage",
+          "fullPage": true
+        }
+      ]
+    }
+  ]
+}
