@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This document outlines the infrastructure for running Playwright browser automation on a Mac Mini server, with job queue and metadata stored in Neon PostgreSQL. This approach provides full Playwright capabilities without serverless limitations.
+This document outlines the infrastructure for running Playwright browser automation on a Mac Mini server, with job queue and metadata stored in Neon PostgreSQL, and artifacts served via Vercel Blob. This approach provides full Playwright capabilities without serverless limitations.
 
 ## Architecture Overview
 
@@ -11,26 +11,17 @@ This document outlines the infrastructure for running Playwright browser automat
 │                 │         │                      │
 │   Vercel App    │────────▶│   Neon PostgreSQL    │
 │   (Frontend +   │         │   (Job Queue +       │
-│   API Routes)   │         │    Metadata)         │
+│   API + Blob)   │         │    Metadata)         │
 │                 │         │                      │
-└─────────────────┘         └──────────┬───────────┘
-                                       │
-                                       │ polls for jobs
-                                       ▼
-                            ┌──────────────────────┐
-                            │                      │
-                            │   Mac Mini Server    │
+└────────▲────────┘         └──────────┬───────────┘
+         │                             │
+         │ uploads artifacts           │ polls for jobs
+         │                             ▼
+         │                  ┌──────────────────────┐
+         │                  │                      │
+         └──────────────────│   Mac Mini Server    │
                             │   (Playwright +      │
                             │    Job Runner)       │
-                            │                      │
-                            └──────────┬───────────┘
-                                       │
-                                       │ uploads artifacts
-                                       ▼
-                            ┌──────────────────────┐
-                            │                      │
-                            │   Cloudflare R2      │
-                            │   (Artifact Storage) │
                             │                      │
                             └──────────────────────┘
 ```
@@ -93,18 +84,18 @@ api/
 1. Poll Neon every 5 seconds for `status = 'pending'` jobs
 2. Claim job (set `status = 'running'`)
 3. Execute Playwright review using existing `src/index.mjs`
-4. Upload artifacts to R2
+4. Upload artifacts to Vercel Blob
 5. Update job with results (set `status = 'completed'`)
 
-### 4. Cloudflare R2 (Storage)
+### 4. Vercel Blob (Storage)
 
 **Role**: Artifact storage with CDN
 
 **Benefits**:
-- No egress fees
-- S3-compatible API
-- Global CDN for fast artifact delivery
-- Already configured in your setup
+- Simple `put()` API from `@vercel/blob`
+- Automatic CDN via Vercel Edge Network
+- Already part of Vercel ecosystem (no extra accounts)
+- Returns public URLs directly
 
 ## Implementation
 
@@ -133,8 +124,7 @@ CREATE TABLE review_artifacts (
   job_id UUID REFERENCES review_jobs(id) ON DELETE CASCADE,
   type VARCHAR(50) NOT NULL,     -- 'screenshot', 'video', 'slideshow', 'report'
   name VARCHAR(255),
-  storage_key TEXT NOT NULL,     -- R2 key
-  storage_url TEXT NOT NULL,     -- Public URL
+  blob_url TEXT NOT NULL,        -- Vercel Blob public URL
   viewport VARCHAR(50),          -- 'desktop', 'mobile'
   step_index INTEGER,
   file_size INTEGER,
@@ -191,8 +181,8 @@ export async function POST(request: Request) {
 ```javascript
 // runner/job-runner.mjs
 import { neon } from "@neondatabase/serverless";
+import { put } from "@vercel/blob";
 import { runReview } from "../src/index.mjs";
-import { uploadToR2 } from "./r2-client.mjs";
 import fs from "fs/promises";
 import path from "path";
 
@@ -218,6 +208,15 @@ async function claimJob(sql) {
   return job;
 }
 
+async function uploadToBlob(pathname, content, contentType) {
+  const blob = await put(pathname, content, {
+    access: "public",
+    contentType,
+    token: process.env.BLOB_READ_WRITE_TOKEN,
+  });
+  return blob.url;
+}
+
 async function processJob(sql, job) {
   const config = {
     title: job.title,
@@ -230,32 +229,38 @@ async function processJob(sql, job) {
     // Run the review using existing code
     await runReview(config);
 
-    // Upload artifacts to R2
+    // Upload artifacts to Vercel Blob
     const artifactsDir = path.join(config.outputDir, "artifacts");
     const files = await fs.readdir(artifactsDir);
 
     for (const file of files) {
       const filePath = path.join(artifactsDir, file);
       const content = await fs.readFile(filePath);
-      const key = `${job.id}/${file}`;
-      const url = await uploadToR2(key, content);
+      const blobUrl = await uploadToBlob(
+        `reviews/${job.id}/${file}`,
+        content,
+        getMimeType(file)
+      );
 
       // Record artifact in database
       await sql`
-        INSERT INTO review_artifacts (job_id, type, name, storage_key, storage_url)
-        VALUES (${job.id}, ${getArtifactType(file)}, ${file}, ${key}, ${url})
+        INSERT INTO review_artifacts (job_id, type, name, blob_url)
+        VALUES (${job.id}, ${getArtifactType(file)}, ${file}, ${blobUrl})
       `;
     }
 
     // Upload HTML report
     const reportPath = path.join(config.outputDir, "index.html");
     const reportContent = await fs.readFile(reportPath);
-    const reportKey = `${job.id}/index.html`;
-    const reportUrl = await uploadToR2(reportKey, reportContent, "text/html");
+    const reportUrl = await uploadToBlob(
+      `reviews/${job.id}/index.html`,
+      reportContent,
+      "text/html"
+    );
 
     await sql`
-      INSERT INTO review_artifacts (job_id, type, name, storage_key, storage_url)
-      VALUES (${job.id}, 'report', 'index.html', ${reportKey}, ${reportUrl})
+      INSERT INTO review_artifacts (job_id, type, name, blob_url)
+      VALUES (${job.id}, 'report', 'index.html', ${reportUrl})
     `;
 
     // Mark job complete
@@ -266,6 +271,7 @@ async function processJob(sql, job) {
     `;
 
     console.log(`✅ Job ${job.id} completed`);
+    console.log(`📄 Report: ${reportUrl}`);
 
     // Cleanup temp files
     await fs.rm(config.outputDir, { recursive: true, force: true });
@@ -281,6 +287,19 @@ async function processJob(sql, job) {
       WHERE id = ${job.id}
     `;
   }
+}
+
+function getMimeType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  const types = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webm": "video/webm",
+    ".gif": "image/gif",
+    ".html": "text/html",
+  };
+  return types[ext] || "application/octet-stream";
 }
 
 function getArtifactType(filename) {
@@ -315,48 +334,7 @@ async function main() {
 main();
 ```
 
-### Phase 4: R2 Upload Utility
-
-```javascript
-// runner/r2-client.mjs
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-
-const r2 = new S3Client({
-  region: "auto",
-  endpoint: `https://${process.env.CF_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-  },
-});
-
-const BUCKET = process.env.R2_BUCKET;
-const PUBLIC_URL = process.env.R2_PUBLIC_URL; // e.g., https://reviews.yourdomain.com
-
-export async function uploadToR2(key, data, contentType) {
-  const mimeTypes = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".webm": "video/webm",
-    ".gif": "image/gif",
-    ".html": "text/html",
-  };
-
-  const ext = key.substring(key.lastIndexOf("."));
-  const mime = contentType || mimeTypes[ext] || "application/octet-stream";
-
-  await r2.send(new PutObjectCommand({
-    Bucket: BUCKET,
-    Key: key,
-    Body: data,
-    ContentType: mime,
-  }));
-
-  return `${PUBLIC_URL}/${key}`;
-}
-```
-
-### Phase 5: Mac Mini Setup
+### Phase 4: Mac Mini Setup
 
 ```bash
 # On Mac Mini
@@ -372,11 +350,7 @@ npx playwright install
 # 3. Create .env for runner
 cat > .env.runner << EOF
 DATABASE_URL=postgres://...@...neon.tech/reviews
-CF_ACCOUNT_ID=your_cloudflare_account_id
-R2_ACCESS_KEY_ID=your_r2_access_key
-R2_SECRET_ACCESS_KEY=your_r2_secret
-R2_BUCKET=browser-review-artifacts
-R2_PUBLIC_URL=https://artifacts.yourdomain.com
+BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...  # From Vercel Dashboard
 WORKER_ID=mac-mini-1
 OPENAI_API_KEY=sk-...  # For AI descriptions
 EOF
@@ -394,17 +368,14 @@ pm2 startup  # Enable auto-start on boot
 
 ```bash
 DATABASE_URL=postgres://...@...neon.tech/reviews
+BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...  # Auto-created when you add Blob storage
 ```
 
 ### Mac Mini Runner
 
 ```bash
 DATABASE_URL=postgres://...@...neon.tech/reviews
-CF_ACCOUNT_ID=your_cloudflare_account_id
-R2_ACCESS_KEY_ID=your_r2_access_key
-R2_SECRET_ACCESS_KEY=your_r2_secret
-R2_BUCKET=browser-review-artifacts
-R2_PUBLIC_URL=https://artifacts.yourdomain.com
+BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...  # Same token, get from Vercel Dashboard
 WORKER_ID=mac-mini-1
 OPENAI_API_KEY=sk-...
 ```
@@ -415,9 +386,11 @@ OPENAI_API_KEY=sk-...
 |-----------|------|
 | Mac Mini | $0 (already owned) |
 | Neon PostgreSQL | $0 (free tier: 0.5GB) |
-| Cloudflare R2 | $0-5/mo (10GB free, then $0.015/GB) |
+| Vercel Blob | Included with Pro ($20/mo includes 1GB, then $0.15/GB) |
 | Vercel | $0 (hobby) or $20/mo (pro) |
-| **Total** | **$0-25/mo** |
+| **Total** | **$0-20/mo** |
+
+Note: Vercel Hobby includes limited Blob storage. Pro plan recommended for production.
 
 ## Scaling Considerations
 
@@ -441,10 +414,10 @@ OPENAI_API_KEY=sk-...
 ## Security
 
 1. **Database**: Neon connection requires SSL
-2. **R2**: Signed URLs for private artifacts (optional)
+2. **Blob token**: Keep `BLOB_READ_WRITE_TOKEN` secret, never commit
 3. **Job validation**: Sanitize URLs, limit domains
 4. **Runner isolation**: Each job in temp directory, cleaned after
-5. **Secrets**: Use `.env` files, never commit
+5. **Secrets**: Use `.env` files, add to `.gitignore`
 
 ## Monitoring
 
@@ -474,7 +447,7 @@ export async function GET() {
 
 ### Immediate
 1. [ ] Create Neon database and run schema migration
-2. [ ] Set up R2 bucket with public access
+2. [ ] Enable Vercel Blob storage in project settings
 3. [ ] Create `runner/` directory with job runner code
 4. [ ] Test job runner locally before deploying to Mac Mini
 
@@ -492,7 +465,7 @@ export async function GET() {
 
 ## References
 
+- [Vercel Blob Documentation](https://vercel.com/docs/storage/vercel-blob)
 - [Neon Serverless Driver](https://neon.tech/docs/serverless/serverless-driver)
-- [Cloudflare R2 Docs](https://developers.cloudflare.com/r2/)
 - [PM2 Process Manager](https://pm2.keymetrics.io/)
 - [Playwright Documentation](https://playwright.dev/)
