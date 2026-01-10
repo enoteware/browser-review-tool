@@ -1,0 +1,112 @@
+{
+  "title": "Task #123: Updated Contact Form Validation",
+  "baseUrl": "http://localhost:7777",
+  "devices": ["desktop", "mobile"],
+  "videoFormat": "gif",
+  "gifQuality": "medium",
+  "useAI": true,
+  "aiModel": "gpt-4o",
+  "clientRequest": "Please add proper validation to the contact form - show error messages for empty fields and invalid email",
+  "clientflowTaskUrl": "https://app.clientflow.io/tasks/123",
+  "clientflowTaskId": "123",
+  "steps": [
+    {
+      "name": "Form Initial State",
+      "url": "/contact",
+      "record": false,
+      "actions": [
+        {
+          "type": "screenshot",
+          "name": "form-initial",
+          "fullPage": false
+        }
+      ]
+    },
+    {
+      "name": "Submit Empty Form - Validation",
+      "url": "/contact",
+      "record": true,
+      "actions": [
+        {
+          "type": "wait",
+          "ms": 500
+        },
+        {
+          "type": "click",
+          "selector": "button[type='submit']",
+          "waitAfter": 1000
+        },
+        {
+          "type": "screenshot",
+          "name": "validation-errors"
+        }
+      ]
+    },
+    {
+      "name": "Fill Form with Invalid Email",
+      "url": "/contact",
+      "record": true,
+      "actions": [
+        {
+          "type": "type",
+          "selector": "input[name='name']",
+          "text": "John Doe",
+          "waitAfter": 300
+        },
+        {
+          "type": "type",
+          "selector": "input[name='email']",
+          "text": "not-an-email",
+          "waitAfter": 300
+        },
+        {
+          "type": "click",
+          "selector": "button[type='submit']",
+          "waitAfter": 1000
+        },
+        {
+          "type": "screenshot",
+          "name": "email-validation-error"
+        }
+      ]
+    },
+    {
+      "name": "Successful Form Submission",
+      "url": "/contact",
+      "record": true,
+      "actions": [
+        {
+          "type": "type",
+          "selector": "input[name='name']",
+          "text": "John Doe",
+          "waitAfter": 300
+        },
+        {
+          "type": "type",
+          "selector": "input[name='email']",
+          "text": "john@example.com",
+          "waitAfter": 300
+        },
+        {
+          "type": "type",
+          "selector": "textarea[name='message']",
+          "text": "This is a test message to verify the form works correctly.",
+          "waitAfter": 300
+        },
+        {
+          "type": "screenshot",
+          "name": "form-filled"
+        },
+        {
+          "type": "click",
+          "selector": "button[type='submit']",
+          "waitAfter": 2000
+        },
+        {
+          "type": "screenshot",
+          "name": "form-success"
+        }
+      ]
+    }
+  ]
+}

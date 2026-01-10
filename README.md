@@ -13,6 +13,8 @@ A standalone tool for creating shareable HTML review reports with screenshots an
 - ⚙️ **Configurable**: JSON config files for complex review workflows
 - 💾 **Description Caching**: Cache AI descriptions to avoid re-generation
 - 🔗 **ClientFlow Integration**: Link reports back to ClientFlow tasks
+- 📱 **Multi-Device Capture**: Run reviews on desktop AND mobile viewports simultaneously
+- 🖼️ **Embeddable Output**: Generate iframe-ready HTML for embedding in ClientFlow task views
 
 ## Installation
 
@@ -206,6 +208,9 @@ Options:
   --ai-provider <name>   AI provider (default: openai)
   --ai-model <name>      AI model (default: gpt-4o)
   --force-ai             Force AI regeneration (ignore cache)
+  --devices <list>       Comma-separated devices: desktop,mobile,tablet,laptop
+  --embeddable           Generate iframe-embeddable HTML output
+  --clientflow-task-id   ClientFlow task ID for integration
   --help                 Show help
 ```
 
@@ -357,6 +362,123 @@ If ffmpeg is not installed:
 - Videos will be saved as WebM instead of GIFs
 - Video frame extraction for AI analysis will be skipped
 
+## ClientFlow Integration
+
+The Browser Review Tool is designed to integrate seamlessly with ClientFlow for proving task completion to clients.
+
+### Typical Workflow
+
+1. **Client requests update** via ClientFlow portal
+2. **You perform the work**
+3. **Run browser review** with desktop + mobile capture
+4. **AI generates summary** of what was done
+5. **Embed review in ClientFlow** task for client to see
+
+### Multi-Device Capture
+
+Capture the same review on desktop AND mobile in one command:
+
+```bash
+# Quick multi-device review
+node src/index.mjs --title "Task #123: Fix Button" --url http://localhost:7777 --devices desktop,mobile
+
+# Available devices
+# desktop       1920x1080
+# laptop        1440x900
+# tablet        768x1024
+# mobile        375x812
+# mobile-landscape  812x375
+```
+
+### Config File with Multi-Device
+
+```json
+{
+  "title": "Task #123: Updated Form Validation",
+  "baseUrl": "http://localhost:7777",
+  "devices": ["desktop", "mobile"],
+  "clientRequest": "Add proper validation to the contact form",
+  "clientflowTaskUrl": "https://app.clientflow.io/tasks/123",
+  "steps": [
+    {
+      "name": "Form Validation Demo",
+      "url": "/contact",
+      "record": true,
+      "actions": [
+        { "type": "screenshot", "name": "initial" },
+        { "type": "click", "selector": "button[type='submit']" },
+        { "type": "screenshot", "name": "errors-shown" }
+      ]
+    }
+  ]
+}
+```
+
+### Output Files
+
+Every review generates three outputs:
+
+```
+review-reports/
+├── index.html      # Full standalone report
+├── embed.html      # Compact version for iframes
+├── review.json     # Structured data for API integration
+└── artifacts/      # Screenshots and recordings
+```
+
+### Embedding in ClientFlow
+
+Use the `embed.html` file to display reviews in ClientFlow task views:
+
+```html
+<iframe
+  src="https://your-host.com/reviews/task-123/embed.html"
+  width="100%"
+  height="600"
+  frameborder="0">
+</iframe>
+```
+
+The embed view features:
+- **Device tabs** - Switch between Desktop/Mobile views
+- **AI Summary** - Generated description of what was done
+- **Recordings** - GIF/video proof of the work
+- **Clean design** - Matches ClientFlow branding
+
+### ClientFlow API
+
+Use the `/api/clientflow` endpoint to generate review commands:
+
+```bash
+# Get API info
+curl https://your-deployment.vercel.app/api/clientflow
+
+# Generate review command
+curl -X POST https://your-deployment.vercel.app/api/clientflow \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Task #123: Fix Button",
+    "url": "http://localhost:7777",
+    "taskId": "123",
+    "devices": ["desktop", "mobile"]
+  }'
+```
+
+### Example: Complete Task Review
+
+```bash
+# Run a full ClientFlow task review
+node src/index.mjs --config examples/clientflow-review.json
+
+# Or via command line
+node src/index.mjs \
+  --title "Task #123: Form Validation" \
+  --url http://localhost:7777/contact \
+  --devices desktop,mobile \
+  --clientflow-url "https://app.clientflow.io/tasks/123" \
+  --client-request "Add validation to contact form"
+```
+
 ## Invoy/ClientFlow Branding
 
 Reports are styled to match Invoy/ClientFlow branding for a consistent client experience. The HTML templates use:
@@ -366,7 +488,9 @@ Reports are styled to match Invoy/ClientFlow branding for a consistent client ex
 
 ## Examples
 
-See the `examples/` directory for example configuration files.
+See the `examples/` directory for example configuration files:
+- `review-config.json` - Basic multi-step review
+- `clientflow-review.json` - ClientFlow integration example with multi-device
 
 ## Tips
 

@@ -62,11 +62,21 @@ function getOpenAIModel(modelName = 'gpt-4o') {
   return provider(modelName);
 }
 
+// Common device presets for multi-device testing
+const DEVICE_PRESETS = {
+  desktop: { width: 1920, height: 1080, name: 'Desktop', isMobile: false },
+  laptop: { width: 1440, height: 900, name: 'Laptop', isMobile: false },
+  tablet: { width: 768, height: 1024, name: 'Tablet', isMobile: true },
+  mobile: { width: 375, height: 812, name: 'Mobile', isMobile: true },
+  'mobile-landscape': { width: 812, height: 375, name: 'Mobile Landscape', isMobile: true },
+};
+
 // Configuration
 const DEFAULT_CONFIG = {
   baseUrl: process.env.BASE_URL || 'http://localhost:7777',
   outputDir: path.join(process.cwd(), 'review-reports'),
   viewport: { width: 1920, height: 1080 },
+  devices: null, // Array of device names or custom viewports for multi-device capture
   videoFormat: 'gif', // 'gif' or 'webm'
   gifQuality: 'medium', // 'low', 'medium', 'high'
   screenshotFormat: 'png',
@@ -74,6 +84,8 @@ const DEFAULT_CONFIG = {
   aiProvider: 'openai',
   aiModel: 'gpt-4o',
   maxScreenshotsPerStep: 10,
+  embeddable: false, // Generate iframe-embeddable output
+  clientflowTaskId: null, // ClientFlow task ID for direct integration
 };
 
 // Parse command line arguments
@@ -187,6 +199,28 @@ async function parseArgs() {
       case '--force-ai':
         config.forceAI = true;
         break;
+      case '--devices':
+        if (i + 1 >= args.length) {
+          throw new Error('--devices requires a comma-separated list of devices');
+        }
+        config.devices = args[++i].split(',').map(d => d.trim());
+        // Validate device names
+        for (const device of config.devices) {
+          if (!DEVICE_PRESETS[device]) {
+            const validDevices = Object.keys(DEVICE_PRESETS).join(', ');
+            throw new Error(`Unknown device: ${device}. Valid devices: ${validDevices}`);
+          }
+        }
+        break;
+      case '--embeddable':
+        config.embeddable = true;
+        break;
+      case '--clientflow-task-id':
+        if (i + 1 >= args.length) {
+          throw new Error('--clientflow-task-id requires a value');
+        }
+        config.clientflowTaskId = args[++i];
+        break;
       case '--help':
         console.log(`
 Browser Review Tool
@@ -208,7 +242,17 @@ Options:
   --ai-provider <name>   AI provider (default: openai)
   --ai-model <name>      AI model (default: gpt-4o)
   --force-ai             Force AI regeneration (ignore cache)
+  --devices <list>       Comma-separated devices: desktop,mobile,tablet,laptop
+  --embeddable           Generate iframe-embeddable HTML output
+  --clientflow-task-id   ClientFlow task ID for integration
   --help                 Show this help
+
+Devices:
+  desktop              1920x1080
+  laptop               1440x900
+  tablet               768x1024 (portrait)
+  mobile               375x812 (iPhone style)
+  mobile-landscape     812x375
 
 Config File Format:
   {
@@ -490,6 +534,230 @@ async function saveCachedDescriptions(outputDir, descriptions) {
   } catch (error) {
     console.warn(`⚠️  Failed to save cached descriptions: ${error.message}`);
   }
+}
+
+// Generate embeddable HTML for ClientFlow integration
+async function generateEmbeddableReport(config, artifacts, descriptions = null) {
+  await ensureDir(config.outputDir);
+  const timestamp = new Date().toISOString();
+  const embedPath = path.join(config.outputDir, 'embed.html');
+
+  // Group artifacts by device then by step
+  const deviceGroups = new Map();
+  for (const artifact of artifacts) {
+    const device = artifact.device || 'Desktop';
+    if (!deviceGroups.has(device)) {
+      deviceGroups.set(device, []);
+    }
+    deviceGroups.get(device).push(artifact);
+  }
+
+  const devices = Array.from(deviceGroups.keys());
+  const hasMultipleDevices = devices.length > 1;
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${config.title || 'Review'}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', sans-serif;
+      background: #fff;
+      color: #1d1d1f;
+      line-height: 1.5;
+      padding: 16px;
+    }
+    .header { margin-bottom: 20px; }
+    .title { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+    .meta { font-size: 13px; color: #86868b; }
+    .summary-box {
+      background: #f5f5f7;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 20px;
+      border-left: 3px solid #007aff;
+    }
+    .summary-label { font-size: 11px; text-transform: uppercase; color: #86868b; margin-bottom: 4px; }
+    .summary-text { font-size: 14px; color: #1d1d1f; }
+    .device-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      border-bottom: 1px solid #e5e5e5;
+      padding-bottom: 8px;
+    }
+    .device-tab {
+      padding: 8px 16px;
+      border-radius: 8px;
+      background: #f5f5f7;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    .device-tab.active { background: #007aff; color: #fff; }
+    .device-tab:hover:not(.active) { background: #e5e5e5; }
+    .device-panel { display: none; }
+    .device-panel.active { display: block; }
+    .artifact-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    .artifact {
+      background: #f5f5f7;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .artifact-media {
+      width: 100%;
+      display: block;
+      background: #000;
+    }
+    .artifact-info {
+      padding: 12px;
+    }
+    .artifact-name { font-size: 13px; font-weight: 500; }
+    .artifact-meta { font-size: 11px; color: #86868b; margin-top: 4px; }
+    .step-section { margin-bottom: 24px; }
+    .step-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #1d1d1f; }
+    .powered-by {
+      text-align: center;
+      font-size: 11px;
+      color: #86868b;
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid #e5e5e5;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="title">${config.title || 'Review Complete'}</div>
+    <div class="meta">${new Date(timestamp).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
+  </div>
+
+  ${descriptions?.description || config.description ? `
+  <div class="summary-box">
+    <div class="summary-label">Summary</div>
+    <div class="summary-text">${descriptions?.description || config.description}</div>
+  </div>
+  ` : ''}
+
+  ${hasMultipleDevices ? `
+  <div class="device-tabs">
+    ${devices.map((device, i) => `
+      <button class="device-tab${i === 0 ? ' active' : ''}" data-device="${device}">${device}</button>
+    `).join('')}
+  </div>
+  ` : ''}
+
+  ${devices.map((device, i) => {
+    const deviceArtifacts = deviceGroups.get(device);
+    const recordings = deviceArtifacts.filter(a => a.type === 'gif' || a.type === 'video');
+    const screenshots = deviceArtifacts.filter(a => a.type === 'screenshot');
+
+    return `
+    <div class="device-panel${i === 0 ? ' active' : ''}" data-device="${device}">
+      ${recordings.length > 0 ? `
+      <div class="step-section">
+        <div class="step-title">Recordings</div>
+        <div class="artifact-grid">
+          ${recordings.map(art => `
+          <div class="artifact">
+            ${art.type === 'gif'
+              ? `<img class="artifact-media" src="artifacts/${path.basename(art.path)}" alt="${art.name}" />`
+              : `<video class="artifact-media" controls><source src="artifacts/${path.basename(art.path)}" type="video/webm"></video>`
+            }
+            <div class="artifact-info">
+              <div class="artifact-name">${art.stepName || art.name}</div>
+              <div class="artifact-meta">${art.viewport ? `${art.viewport.width}×${art.viewport.height}` : ''}</div>
+            </div>
+          </div>
+          `).join('')}
+        </div>
+      </div>
+      ` : ''}
+
+      ${screenshots.length > 0 ? `
+      <div class="step-section">
+        <div class="step-title">Screenshots</div>
+        <div class="artifact-grid">
+          ${screenshots.map(art => `
+          <div class="artifact">
+            <img class="artifact-media" src="artifacts/${path.basename(art.path)}" alt="${art.name}" />
+            <div class="artifact-info">
+              <div class="artifact-name">${art.name.replace(device + ' - ', '')}</div>
+              <div class="artifact-meta">${art.viewport ? `${art.viewport.width}×${art.viewport.height}` : ''}</div>
+            </div>
+          </div>
+          `).join('')}
+        </div>
+      </div>
+      ` : ''}
+    </div>
+    `;
+  }).join('')}
+
+  <div class="powered-by">Powered by Browser Review Tool</div>
+
+  ${hasMultipleDevices ? `
+  <script>
+    document.querySelectorAll('.device-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const device = tab.dataset.device;
+        document.querySelectorAll('.device-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.device-panel').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        document.querySelector(\`.device-panel[data-device="\${device}"]\`).classList.add('active');
+      });
+    });
+  </script>
+  ` : ''}
+</body>
+</html>`;
+
+  await fs.writeFile(embedPath, html);
+  return embedPath;
+}
+
+// Generate JSON data for ClientFlow API
+async function generateReviewJSON(config, artifacts, descriptions = null) {
+  const jsonPath = path.join(config.outputDir, 'review.json');
+
+  const data = {
+    title: config.title,
+    timestamp: new Date().toISOString(),
+    baseUrl: config.baseUrl,
+    clientflowTaskId: config.clientflowTaskId || null,
+    clientflowTaskUrl: config.clientflowTaskUrl || descriptions?.clientflowTaskUrl || null,
+    clientRequest: config.clientRequest || descriptions?.clientRequest || null,
+    description: descriptions?.description || config.description || null,
+    devices: [...new Set(artifacts.map(a => a.device || 'Desktop'))],
+    summary: {
+      totalArtifacts: artifacts.length,
+      screenshots: artifacts.filter(a => a.type === 'screenshot').length,
+      recordings: artifacts.filter(a => a.type === 'gif' || a.type === 'video').length,
+    },
+    artifacts: artifacts.map(a => ({
+      type: a.type,
+      name: a.name,
+      filename: path.basename(a.path),
+      device: a.device || 'Desktop',
+      viewport: a.viewport || null,
+      stepIndex: a.stepIndex,
+      stepName: a.stepName,
+      timestamp: a.timestamp,
+    })),
+    steps: descriptions?.steps || [],
+  };
+
+  await fs.writeFile(jsonPath, JSON.stringify(data, null, 2));
+  return { path: jsonPath, data };
 }
 
 // Generate HTML report
@@ -926,6 +1194,200 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
   return reportPath;
 }
 
+// Run review steps for a single device
+async function runDeviceReview(browser, config, device, artifactsDir) {
+  const deviceName = device.name;
+  const viewport = { width: device.width, height: device.height };
+  const artifacts = [];
+  const devicePrefix = config.devices && config.devices.length > 1 ? `${deviceName.toLowerCase().replace(/\s+/g, '-')}-` : '';
+
+  console.log(`\n📱 Running on ${deviceName} (${viewport.width}x${viewport.height})...`);
+
+  const context = await browser.newContext({
+    viewport,
+    isMobile: device.isMobile || false,
+    recordVideo:
+      config.videoFormat === 'webm'
+        ? {
+            dir: artifactsDir,
+            size: viewport,
+          }
+        : undefined,
+  });
+
+  const page = await context.newPage();
+
+  try {
+    // If single URL provided, do a simple review
+    if (config.url && !config.steps) {
+      console.log(`   📍 Navigating to ${config.url}`);
+      await page.goto(config.url, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.waitForTimeout(1000);
+
+      const screenshotPath = path.join(artifactsDir, `${devicePrefix}review-screenshot.png`);
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      artifacts.push({
+        type: 'screenshot',
+        name: `${deviceName} - Page Screenshot`,
+        path: screenshotPath,
+        timestamp: Date.now(),
+        stepIndex: -1,
+        stepName: null,
+        device: deviceName,
+        viewport,
+      });
+      console.log(`   ✅ Screenshot captured`);
+    }
+
+    // If config has steps, execute them
+    if (config.steps && Array.isArray(config.steps)) {
+      for (let stepIndex = 0; stepIndex < config.steps.length; stepIndex++) {
+        const step = config.steps[stepIndex];
+        console.log(`   📋 Step ${stepIndex + 1}: ${step.name}`);
+
+        if (step.url) {
+          const fullUrl = step.url.startsWith('http') ? step.url : `${config.baseUrl}${step.url}`;
+          await page.goto(fullUrl, { waitUntil: 'networkidle' });
+          await page.waitForTimeout(500);
+        }
+
+        let videoPath = null;
+        if (step.record) {
+          // Start video recording for this step
+          const videoContext = await browser.newContext({
+            viewport,
+            isMobile: device.isMobile || false,
+            recordVideo: {
+              dir: artifactsDir,
+              size: viewport,
+            },
+          });
+          const videoPage = await videoContext.newPage();
+
+          // Navigate to the same URL
+          const stepUrl = step.url
+            ? step.url.startsWith('http')
+              ? step.url
+              : `${config.baseUrl}${step.url}`
+            : page.url();
+          await videoPage.goto(stepUrl, { waitUntil: 'networkidle' });
+          await videoPage.waitForTimeout(500);
+
+          // Execute actions with recording
+          if (step.actions) {
+            for (const action of step.actions) {
+              await executeAction(videoPage, action, config, artifactsDir, artifacts, stepIndex, step.name, devicePrefix, deviceName, viewport);
+            }
+          }
+
+          await videoContext.close();
+
+          // Find and process the video
+          const videoFiles = await fs.readdir(artifactsDir);
+          const latestVideo = videoFiles.filter(f => f.endsWith('.webm')).sort().pop();
+
+          if (latestVideo) {
+            videoPath = path.join(artifactsDir, latestVideo);
+            const stepSlug = step.name.replace(/\s+/g, '-').toLowerCase();
+
+            if (config.videoFormat === 'gif') {
+              const gifPath = path.join(artifactsDir, `${devicePrefix}${stepSlug}.gif`);
+              const converted = await convertVideoToGif(videoPath, gifPath, config.gifQuality);
+              if (converted) {
+                artifacts.push({
+                  type: 'gif',
+                  name: `${deviceName} - ${step.name}`,
+                  path: gifPath,
+                  timestamp: Date.now(),
+                  stepIndex,
+                  stepName: step.name,
+                  device: deviceName,
+                  viewport,
+                });
+                await fs.unlink(videoPath).catch(() => {});
+              } else {
+                artifacts.push({
+                  type: 'video',
+                  name: `${deviceName} - ${step.name}`,
+                  path: videoPath,
+                  timestamp: Date.now(),
+                  stepIndex,
+                  stepName: step.name,
+                  device: deviceName,
+                  viewport,
+                });
+              }
+            } else {
+              // Rename video with device prefix
+              const newVideoPath = path.join(artifactsDir, `${devicePrefix}${stepSlug}.webm`);
+              await fs.rename(videoPath, newVideoPath).catch(() => {});
+              artifacts.push({
+                type: 'video',
+                name: `${deviceName} - ${step.name}`,
+                path: newVideoPath,
+                timestamp: Date.now(),
+                stepIndex,
+                stepName: step.name,
+                device: deviceName,
+                viewport,
+              });
+            }
+          }
+        } else {
+          // Execute actions without recording
+          if (step.actions) {
+            for (const action of step.actions) {
+              await executeAction(page, action, config, artifactsDir, artifacts, stepIndex, step.name, devicePrefix, deviceName, viewport);
+            }
+          }
+        }
+      }
+    }
+  } finally {
+    await context.close();
+  }
+
+  return artifacts;
+}
+
+// Execute a single action
+async function executeAction(page, action, config, artifactsDir, artifacts, stepIndex, stepName, devicePrefix, deviceName, viewport) {
+  switch (action.type) {
+    case 'screenshot': {
+      const ssPath = path.join(artifactsDir, `${devicePrefix}${action.name || 'screenshot'}.png`);
+      await page.screenshot({ path: ssPath, fullPage: action.fullPage !== false });
+      artifacts.push({
+        type: 'screenshot',
+        name: `${deviceName} - ${action.name || 'Screenshot'}`,
+        path: ssPath,
+        timestamp: Date.now(),
+        stepIndex,
+        stepName,
+        device: deviceName,
+        viewport,
+      });
+      break;
+    }
+    case 'click':
+      await page.click(action.selector);
+      await page.waitForTimeout(action.waitAfter || 500);
+      break;
+    case 'type':
+      await page.fill(action.selector, action.text);
+      await page.waitForTimeout(action.waitAfter || 300);
+      break;
+    case 'wait':
+      await page.waitForTimeout(action.ms || 1000);
+      break;
+    case 'navigate': {
+      const navUrl = action.url.startsWith('http') ? action.url : `${config.baseUrl}${action.url}`;
+      await page.goto(navUrl, { waitUntil: 'networkidle' });
+      await page.waitForTimeout(500);
+      break;
+    }
+  }
+}
+
 // Main review function
 async function runReview(config) {
   console.log('🎬 Running browser review...');
@@ -938,14 +1400,34 @@ async function runReview(config) {
     const artifactsDir = path.join(config.outputDir, 'artifacts');
     await ensureDir(artifactsDir);
 
-    const artifacts = [];
+    // Determine which devices to run on
+    let devices = [];
+    if (config.devices && Array.isArray(config.devices) && config.devices.length > 0) {
+      devices = config.devices.map(d => {
+        if (typeof d === 'string') {
+          return DEVICE_PRESETS[d] || DEVICE_PRESETS.desktop;
+        }
+        return { ...DEVICE_PRESETS.desktop, ...d };
+      });
+      console.log(`📱 Multi-device mode: ${devices.map(d => d.name).join(', ')}`);
+    } else {
+      // Single device mode - use viewport from config
+      devices = [{
+        ...DEVICE_PRESETS.desktop,
+        width: config.viewport?.width || 1920,
+        height: config.viewport?.height || 1080,
+        name: 'Desktop',
+      }];
+    }
+
+    const allArtifacts = [];
 
     console.log('🌐 Launching browser...');
     let browser;
     try {
       browser = await chromium.launch({
-        headless: false, // Non-headless for better recording
-        args: ['--no-sandbox', '--disable-setuid-sandbox'], // For better compatibility
+        headless: true, // Headless for multi-device
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
       });
     } catch (error) {
       const msg =
@@ -955,227 +1437,18 @@ async function runReview(config) {
     }
 
     try {
-      const context = await browser.newContext({
-        viewport: config.viewport,
-        recordVideo:
-          config.videoFormat === 'webm'
-            ? {
-                dir: artifactsDir,
-                size: config.viewport,
-              }
-            : undefined,
-      });
-
-      const page = await context.newPage();
-
-      // If single URL provided, do a simple review
-      if (config.url) {
-        console.log(`📍 Navigating to ${config.url}`);
-        try {
-          await page.goto(config.url, { waitUntil: 'networkidle', timeout: 30000 });
-        } catch (error) {
-          throw new Error(`Failed to load URL ${config.url}: ${error.message}`);
-        }
-
-        await page.waitForTimeout(1000); // Wait for animations
-
-        // Take screenshot
-        const screenshotPath = path.join(artifactsDir, 'review-screenshot.png');
-        try {
-          await page.screenshot({ path: screenshotPath, fullPage: true });
-          artifacts.push({
-            type: 'screenshot',
-            name: 'Page Screenshot',
-            path: screenshotPath,
-            timestamp: Date.now(),
-            stepIndex: -1, // Single URL, no step
-            stepName: null,
-          });
-          console.log('✅ Screenshot captured');
-        } catch (error) {
-          throw new Error(`Failed to capture screenshot: ${error.message}`);
-        }
+      // Run review for each device
+      for (const device of devices) {
+        const deviceArtifacts = await runDeviceReview(browser, config, device, artifactsDir);
+        allArtifacts.push(...deviceArtifacts);
       }
-
-      // If config has steps, execute them
-      if (config.steps && Array.isArray(config.steps)) {
-        for (let stepIndex = 0; stepIndex < config.steps.length; stepIndex++) {
-          const step = config.steps[stepIndex];
-          console.log(`\n📋 Step ${stepIndex + 1}: ${step.name}`);
-
-          if (step.url) {
-            const fullUrl = step.url.startsWith('http') ? step.url : `${config.baseUrl}${step.url}`;
-            console.log(`   Navigating to ${fullUrl}`);
-            await page.goto(fullUrl, { waitUntil: 'networkidle' });
-            await page.waitForTimeout(500);
-          }
-
-          let videoPath = null;
-          if (step.record) {
-            // Start video recording
-            const videoContext = await browser.newContext({
-              viewport: config.viewport,
-              recordVideo: {
-                dir: artifactsDir,
-                size: config.viewport,
-              },
-            });
-            const videoPage = await videoContext.newPage();
-
-            // Navigate to the same URL as the main page or step URL
-            const stepUrl = step.url
-              ? step.url.startsWith('http')
-                ? step.url
-                : `${config.baseUrl}${step.url}`
-              : page.url();
-            await videoPage.goto(stepUrl, { waitUntil: 'networkidle' });
-            await videoPage.waitForTimeout(500);
-
-            // Execute actions
-            if (step.actions) {
-              for (const action of step.actions) {
-                switch (action.type) {
-                  case 'screenshot': {
-                    const ssPath = path.join(artifactsDir, `${action.name || 'screenshot'}.png`);
-                    await videoPage.screenshot({
-                      path: ssPath,
-                      fullPage: action.fullPage !== false,
-                    });
-                    artifacts.push({
-                      type: 'screenshot',
-                      name: action.name || 'Screenshot',
-                      path: ssPath,
-                      timestamp: Date.now(),
-                      stepIndex,
-                      stepName: step.name,
-                    });
-                    break;
-                  }
-                  case 'click':
-                    await videoPage.click(action.selector);
-                    await videoPage.waitForTimeout(action.waitAfter || 500);
-                    break;
-                  case 'type':
-                    await videoPage.fill(action.selector, action.text);
-                    await videoPage.waitForTimeout(action.waitAfter || 300);
-                    break;
-                  case 'wait':
-                    await videoPage.waitForTimeout(action.ms || 1000);
-                    break;
-                  case 'navigate': {
-                    const navUrl = action.url.startsWith('http')
-                      ? action.url
-                      : `${config.baseUrl}${action.url}`;
-                    await videoPage.goto(navUrl, { waitUntil: 'networkidle' });
-                    await videoPage.waitForTimeout(500);
-                    break;
-                  }
-                }
-              }
-            }
-
-            // Stop recording
-            await videoContext.close();
-
-            // Find the video file
-            const videoFiles = await fs.readdir(artifactsDir);
-            const latestVideo = videoFiles
-              .filter(f => f.endsWith('.webm'))
-              .sort()
-              .pop();
-
-            if (latestVideo) {
-              videoPath = path.join(artifactsDir, latestVideo);
-
-              // Convert to GIF if requested
-              if (config.videoFormat === 'gif') {
-                const stepName = step.name.replace(/\s+/g, '-').toLowerCase();
-                const gifPath = path.join(artifactsDir, `${stepName}.gif`);
-                console.log('   Converting video to GIF...');
-                const converted = await convertVideoToGif(videoPath, gifPath, config.gifQuality);
-                if (converted) {
-                  artifacts.push({
-                    type: 'gif',
-                    name: step.name,
-                    path: gifPath,
-                    timestamp: Date.now(),
-                    stepIndex,
-                    stepName: step.name,
-                  });
-                  // Remove original video
-                  await fs.unlink(videoPath).catch(() => {});
-                  console.log('   ✅ GIF created');
-                } else {
-                  artifacts.push({
-                    type: 'video',
-                    name: step.name,
-                    path: videoPath,
-                    timestamp: Date.now(),
-                    stepIndex,
-                    stepName: step.name,
-                  });
-                }
-              } else {
-                artifacts.push({
-                  type: 'video',
-                  name: step.name,
-                  path: videoPath,
-                  timestamp: Date.now(),
-                  stepIndex,
-                  stepName: step.name,
-                });
-              }
-            }
-          } else {
-            // Just execute actions without recording
-            if (step.actions) {
-              for (const action of step.actions) {
-                switch (action.type) {
-                  case 'screenshot': {
-                    const ssPath = path.join(artifactsDir, `${action.name || 'screenshot'}.png`);
-                    await page.screenshot({ path: ssPath, fullPage: action.fullPage !== false });
-                    artifacts.push({
-                      type: 'screenshot',
-                      name: action.name || 'Screenshot',
-                      path: ssPath,
-                      timestamp: Date.now(),
-                      stepIndex,
-                      stepName: step.name,
-                    });
-                    break;
-                  }
-                  case 'click':
-                    await page.click(action.selector);
-                    await page.waitForTimeout(action.waitAfter || 500);
-                    break;
-                  case 'type':
-                    await page.fill(action.selector, action.text);
-                    await page.waitForTimeout(action.waitAfter || 300);
-                    break;
-                  case 'wait':
-                    await page.waitForTimeout(action.ms || 1000);
-                    break;
-                  case 'navigate': {
-                    const navUrl = action.url.startsWith('http')
-                      ? action.url
-                      : `${config.baseUrl}${action.url}`;
-                    await page.goto(navUrl, { waitUntil: 'networkidle' });
-                    await page.waitForTimeout(500);
-                    break;
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-
-      await context.close();
     } finally {
       if (browser) {
         await browser.close();
       }
     }
+
+    const artifacts = allArtifacts;
 
     // Extract video frames for AI analysis
     const extractedFrames = [];
@@ -1354,9 +1627,19 @@ async function runReview(config) {
     console.log('\n📄 Generating HTML report...');
     const reportPath = await generateHTMLReport(config, artifacts, descriptions);
     console.log(`✅ Report generated: ${reportPath}`);
-    console.log(`\n🎉 Review complete! Open ${reportPath} in your browser.`);
 
-    return reportPath;
+    // Always generate embeddable output and JSON for ClientFlow integration
+    const embedPath = await generateEmbeddableReport(config, artifacts, descriptions);
+    console.log(`✅ Embeddable report: ${embedPath}`);
+
+    const { path: jsonPath, data: reviewData } = await generateReviewJSON(config, artifacts, descriptions);
+    console.log(`✅ JSON data: ${jsonPath}`);
+
+    console.log(`\n🎉 Review complete! Open ${reportPath} in your browser.`);
+    console.log(`📱 Multi-device: ${reviewData.devices.join(', ')}`);
+    console.log(`📊 Artifacts: ${reviewData.summary.screenshots} screenshots, ${reviewData.summary.recordings} recordings`);
+
+    return { reportPath, embedPath, jsonPath, data: reviewData };
   } catch (error) {
     console.error('❌ Error during review:', error.message);
     throw error;
@@ -1473,8 +1756,17 @@ async function main() {
   }
 }
 
-// Export functions for testing
-export { parseArgs, ensureDir, generateHTMLReport, checkFFmpeg };
+// Export functions for testing and ClientFlow integration
+export {
+  parseArgs,
+  ensureDir,
+  generateHTMLReport,
+  generateEmbeddableReport,
+  generateReviewJSON,
+  checkFFmpeg,
+  runReview,
+  DEVICE_PRESETS,
+};
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main();
