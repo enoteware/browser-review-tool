@@ -114,14 +114,35 @@ GET  /health     - Health check
 - Videos (WebM)
 - HTML reports
 
-### 5. Neon PostgreSQL (Optional)
+### 5. Neon PostgreSQL
 
-**Role**: Job history and metadata
+**Role**: Job history linked to existing tasks
 
-**Stores**:
-- Review history
-- Artifact URLs
-- Error logs
+**New table** (links to your existing `tasks` table):
+
+```sql
+-- Task Reviews table (links to existing tasks.id)
+CREATE TABLE task_reviews (
+  id SERIAL PRIMARY KEY,
+  task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,  -- Optional link
+  title VARCHAR(255) NOT NULL,
+  target_url TEXT NOT NULL,
+  report_url TEXT NOT NULL,           -- Vercel Blob URL
+  artifacts JSONB,                     -- [{type, name, url, viewport}]
+  status VARCHAR(50) DEFAULT 'completed',
+  error_message TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Index for finding reviews by task
+CREATE INDEX idx_task_reviews_task_id ON task_reviews(task_id);
+CREATE INDEX idx_task_reviews_created ON task_reviews(created_at DESC);
+```
+
+**Usage**:
+- `task_id` is **optional** - pass it to link review to a task, or omit for standalone
+- Query task reviews: `SELECT * FROM task_reviews WHERE task_id = 123`
+- Query all reviews: `SELECT * FROM task_reviews ORDER BY created_at DESC`
 
 ## Implementation
 
@@ -131,6 +152,7 @@ GET  /health     - Health check
 // runner/server.mjs
 import express from "express";
 import { put } from "@vercel/blob";
+import { neon } from "@neondatabase/serverless";
 import { chromium } from "playwright";
 import fs from "fs/promises";
 import path from "path";
@@ -140,6 +162,7 @@ const app = express();
 app.use(express.json());
 
 const API_SECRET = process.env.API_SECRET;
+const sql = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : null;
 
 // Auth middleware
 function authenticate(req, res, next) {
@@ -158,9 +181,16 @@ app.get("/health", (req, res) => {
 // Main review endpoint
 app.post("/review", authenticate, async (req, res) => {
   const jobId = randomUUID();
-  const { title, url, baseUrl, steps, viewports, useAI } = req.body;
+  const {
+    title,
+    url,
+    baseUrl,
+    viewports,
+    taskId,      // Optional: link to existing task
+  } = req.body;
 
   console.log(`📋 Starting job ${jobId}: ${title}`);
+  if (taskId) console.log(`   Linked to task: ${taskId}`);
 
   try {
     const outputDir = `/tmp/reviews/${jobId}`;
@@ -209,12 +239,28 @@ app.post("/review", authenticate, async (req, res) => {
     await browser.close();
 
     // Generate and upload HTML report
-    const reportHtml = generateReport(title, url, artifacts);
+    const targetUrl = url.startsWith("http") ? url : `${baseUrl}${url}`;
+    const reportHtml = generateReport(title, targetUrl, artifacts);
     const reportBlob = await put(`reviews/${jobId}/index.html`, reportHtml, {
       access: "public",
       contentType: "text/html",
       token: process.env.BLOB_READ_WRITE_TOKEN,
     });
+
+    // Save to Neon if configured (taskId is optional)
+    if (sql) {
+      await sql`
+        INSERT INTO task_reviews (task_id, title, target_url, report_url, artifacts)
+        VALUES (
+          ${taskId || null},
+          ${title},
+          ${targetUrl},
+          ${reportBlob.url},
+          ${JSON.stringify(artifacts)}
+        )
+      `;
+      console.log(`   💾 Saved to database`);
+    }
 
     console.log(`✅ Job ${jobId} completed`);
 
@@ -227,6 +273,7 @@ app.post("/review", authenticate, async (req, res) => {
       jobId,
       reportUrl: reportBlob.url,
       artifacts,
+      taskId: taskId || null,
     });
 
   } catch (error) {
@@ -268,7 +315,26 @@ function generateReport(title, url, artifacts) {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 Review server running on port ${PORT}`);
+  console.log(`📦 Neon: ${sql ? 'connected' : 'not configured (standalone mode)'}`);
 });
+```
+
+**Request Examples**:
+
+```bash
+# With task link (saves to Neon, links to task)
+curl -X POST https://review.yourdomain.com/review \
+  -H "Authorization: Bearer $API_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Fix: Button", "url": "https://example.com", "taskId": 123}'
+
+# Standalone (saves to Neon, no task link)
+curl -X POST https://review.yourdomain.com/review \
+  -H "Authorization: Bearer $API_SECRET" \
+  -d '{"title": "Quick Review", "url": "https://example.com"}'
+
+# No Neon at all (just returns URL, nothing saved)
+# Just don't set DATABASE_URL env var
 ```
 
 ### Phase 2: Cloudflare Tunnel Setup
@@ -352,6 +418,7 @@ cat > .env << EOF
 PORT=3001
 API_SECRET=your-secret-token-here
 BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...
+DATABASE_URL=postgresql://...@...neon.tech/neondb  # Optional: for task linking
 OPENAI_API_KEY=sk-...
 EOF
 
@@ -383,6 +450,7 @@ MAC_MINI_SECRET=your-secret-token-here
 PORT=3001
 API_SECRET=your-secret-token-here
 BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...
+DATABASE_URL=postgresql://...@...neon.tech/neondb  # Optional
 OPENAI_API_KEY=sk-...
 ```
 
