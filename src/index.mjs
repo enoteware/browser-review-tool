@@ -67,7 +67,8 @@ const DEFAULT_CONFIG = {
   baseUrl: process.env.BASE_URL || 'http://localhost:7777',
   outputDir: path.join(process.cwd(), 'review-reports'),
   viewport: { width: 1920, height: 1080 },
-  videoFormat: 'gif', // 'gif' or 'webm'
+  videoFormat: 'slideshow', // 'slideshow' (default, lightweight), 'webm' (full video), 'gif'
+  slideshowFps: 2, // frames per second for slideshow
   gifQuality: 'medium', // 'low', 'medium', 'high'
   screenshotFormat: 'png',
   useAI: true,
@@ -142,8 +143,8 @@ async function parseArgs() {
           throw new Error('--format requires a value');
         }
         config.videoFormat = args[++i];
-        if (!['gif', 'webm'].includes(config.videoFormat)) {
-          throw new Error('--format must be either "gif" or "webm"');
+        if (!['slideshow', 'webm', 'gif'].includes(config.videoFormat)) {
+          throw new Error('--format must be "slideshow", "webm", or "gif"');
         }
         break;
       case '--description':
@@ -364,6 +365,50 @@ async function extractVideoFrames(videoPath, outputDir, maxFrames = 3) {
   }
 }
 
+// Create lightweight WebM slideshow from screenshots
+async function createSlideshowFromScreenshots(screenshotPaths, outputPath, fps = 2) {
+  const hasFFmpeg = checkFFmpeg();
+  if (!hasFFmpeg) {
+    console.warn('⚠️  ffmpeg not found. Skipping slideshow creation.');
+    return false;
+  }
+
+  if (screenshotPaths.length === 0) {
+    console.warn('⚠️  No screenshots provided for slideshow.');
+    return false;
+  }
+
+  try {
+    const outputDir = path.dirname(outputPath);
+    const concatFilePath = path.join(outputDir, 'slideshow-concat.txt');
+
+    // Create concat file for ffmpeg
+    // Each frame displayed for 1/fps seconds
+    const frameDuration = 1 / fps;
+    const concatContent = screenshotPaths
+      .map(p => `file '${p}'\nduration ${frameDuration}`)
+      .join('\n');
+    // Add last frame again (ffmpeg concat demuxer quirk)
+    const lastFrame = screenshotPaths[screenshotPaths.length - 1];
+    await fs.writeFile(concatFilePath, `${concatContent}\nfile '${lastFrame}'`);
+
+    // Create WebM slideshow with low bitrate for small file size
+    const ffmpegCmd =
+      `ffmpeg -f concat -safe 0 -i "${concatFilePath}" ` +
+      `-vf "scale=1280:-2" -c:v libvpx-vp9 -crf 40 -b:v 0 ` +
+      `-an -y "${outputPath}"`;
+    execSync(ffmpegCmd, { stdio: 'ignore' });
+
+    // Clean up concat file
+    await fs.unlink(concatFilePath).catch(() => {});
+
+    return true;
+  } catch (error) {
+    console.error('Error creating slideshow:', error.message);
+    return false;
+  }
+}
+
 // Generate AI description for images using Vercel AI SDK
 async function generateAIDescription(images, clientRequest, stepContext, config) {
   const apiKeyInfo = getAPIKey();
@@ -499,7 +544,9 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
   const reportPath = path.join(config.outputDir, 'index.html');
 
   const screenshots = artifacts.filter(a => a.type === 'screenshot');
-  const videos = artifacts.filter(a => a.type === 'video' || a.type === 'gif');
+  const videos = artifacts.filter(
+    a => a.type === 'video' || a.type === 'gif' || a.type === 'slideshow',
+  );
 
   // Group artifacts by step for display
   const artifactsByStep = new Map();
@@ -679,6 +726,54 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
       color: #1d1d1f;
     }
 
+    /* Device frame styles */
+    .device-frame {
+      background: #1d1d1f;
+      border-radius: 12px;
+      padding: 8px 8px 8px 8px;
+      box-shadow:
+        0 25px 50px -12px rgba(0, 0, 0, 0.25),
+        0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+      position: relative;
+    }
+
+    .device-frame::before {
+      content: '';
+      display: block;
+      height: 28px;
+      background: linear-gradient(180deg, #3a3a3c 0%, #2c2c2e 100%);
+      border-radius: 8px 8px 0 0;
+      margin: -8px -8px 8px -8px;
+      position: relative;
+    }
+
+    .device-frame::after {
+      content: '';
+      position: absolute;
+      top: 14px;
+      left: 16px;
+      width: 48px;
+      height: 10px;
+      display: flex;
+      background:
+        radial-gradient(circle, #ff5f57 4px, transparent 4px) 0 0,
+        radial-gradient(circle, #febc2e 4px, transparent 4px) 16px 0,
+        radial-gradient(circle, #28c840 4px, transparent 4px) 32px 0;
+      background-repeat: no-repeat;
+    }
+
+    .device-frame img,
+    .device-frame video {
+      width: 100%;
+      height: auto;
+      border-radius: 4px;
+      display: block;
+    }
+
+    .device-frame video {
+      background: #000;
+    }
+
     .artifact img,
     .artifact video {
       width: 100%;
@@ -818,7 +913,9 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
               const step = config.steps[stepIndex];
               const stepDescription = descriptions?.steps?.find(s => s.stepIndex === stepIndex);
               const stepScreenshots = stepArtifacts.filter(a => a.type === 'screenshot');
-              const stepVideos = stepArtifacts.filter(a => a.type === 'video' || a.type === 'gif');
+              const stepVideos = stepArtifacts.filter(
+                a => a.type === 'video' || a.type === 'gif' || a.type === 'slideshow',
+              );
 
               return `
     <section class="section step-section">
@@ -838,7 +935,9 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
                 art => `
               <div class="artifact">
                 <h4>${art.name}</h4>
-                <img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />
+                <div class="device-frame">
+                  <img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />
+                </div>
                 <div class="artifact-info">
                   ${art.timestamp ? `Captured: ${new Date(art.timestamp).toLocaleString()}` : ''}
                 </div>
@@ -851,11 +950,10 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
                 art => `
               <div class="artifact">
                 <h4>${art.name}</h4>
+                <div class="device-frame">
                 ${
                   art.type === 'gif'
-                    ? `
-                  <img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />
-                `
+                    ? `<img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />`
                     : `
                   <video controls>
                     <source src="artifacts/${path.basename(art.path)}" type="video/webm">
@@ -863,6 +961,7 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
                   </video>
                 `
                 }
+                </div>
                 <div class="artifact-info">
                   ${art.duration ? `Duration: ${art.duration}s` : ''}
                   ${art.timestamp ? `Recorded: ${new Date(art.timestamp).toLocaleString()}` : ''}
@@ -893,6 +992,7 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
             art => `
           <div class="artifact">
             <h3>${art.name}</h3>
+            <div class="device-frame">
             ${
               art.type === 'screenshot'
                 ? `<img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />`
@@ -905,6 +1005,7 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
               </video>
             `
             }
+            </div>
             <div class="artifact-info">
               ${art.duration ? `Duration: ${art.duration}s` : ''}
               ${art.timestamp ? `Captured: ${new Date(art.timestamp).toLocaleString()}` : ''}
@@ -1012,99 +1113,212 @@ async function runReview(config) {
 
           let videoPath = null;
           if (step.record) {
-            // Start video recording
-            const videoContext = await browser.newContext({
-              viewport: config.viewport,
-              recordVideo: {
-                dir: artifactsDir,
-                size: config.viewport,
-              },
-            });
-            const videoPage = await videoContext.newPage();
+            const stepName = step.name.replace(/\s+/g, '-').toLowerCase();
 
-            // Navigate to the same URL as the main page or step URL
-            const stepUrl = step.url
-              ? step.url.startsWith('http')
-                ? step.url
-                : `${config.baseUrl}${step.url}`
-              : page.url();
-            await videoPage.goto(stepUrl, { waitUntil: 'networkidle' });
-            await videoPage.waitForTimeout(500);
+            // Slideshow mode: take periodic screenshots, combine into lightweight WebM
+            if (config.videoFormat === 'slideshow') {
+              const slideshowScreenshots = [];
 
-            // Execute actions
-            if (step.actions) {
-              for (const action of step.actions) {
-                switch (action.type) {
-                  case 'screenshot': {
-                    const ssPath = path.join(artifactsDir, `${action.name || 'screenshot'}.png`);
-                    await videoPage.screenshot({
-                      path: ssPath,
-                      fullPage: action.fullPage !== false,
-                    });
-                    artifacts.push({
-                      type: 'screenshot',
-                      name: action.name || 'Screenshot',
-                      path: ssPath,
-                      timestamp: Date.now(),
-                      stepIndex,
-                      stepName: step.name,
-                    });
-                    break;
+              // Navigate to step URL
+              const stepUrl = step.url
+                ? step.url.startsWith('http')
+                  ? step.url
+                  : `${config.baseUrl}${step.url}`
+                : page.url();
+              await page.goto(stepUrl, { waitUntil: 'networkidle' });
+              await page.waitForTimeout(300);
+
+              // Take initial screenshot
+              const initialSsPath = path.join(artifactsDir, `${stepName}-slide-000.png`);
+              await page.screenshot({ path: initialSsPath });
+              slideshowScreenshots.push(initialSsPath);
+
+              // Execute actions with periodic screenshots
+              let slideIndex = 1;
+              if (step.actions) {
+                for (const action of step.actions) {
+                  switch (action.type) {
+                    case 'screenshot': {
+                      const ssPath = path.join(artifactsDir, `${action.name || 'screenshot'}.png`);
+                      await page.screenshot({
+                        path: ssPath,
+                        fullPage: action.fullPage !== false,
+                      });
+                      artifacts.push({
+                        type: 'screenshot',
+                        name: action.name || 'Screenshot',
+                        path: ssPath,
+                        timestamp: Date.now(),
+                        stepIndex,
+                        stepName: step.name,
+                      });
+                      // Also add to slideshow
+                      slideshowScreenshots.push(ssPath);
+                      break;
+                    }
+                    case 'click':
+                      await page.click(action.selector);
+                      await page.waitForTimeout(action.waitAfter || 500);
+                      break;
+                    case 'type':
+                      await page.fill(action.selector, action.text);
+                      await page.waitForTimeout(action.waitAfter || 300);
+                      break;
+                    case 'wait':
+                      await page.waitForTimeout(action.ms || 1000);
+                      break;
+                    case 'navigate': {
+                      const navUrl = action.url.startsWith('http')
+                        ? action.url
+                        : `${config.baseUrl}${action.url}`;
+                      await page.goto(navUrl, { waitUntil: 'networkidle' });
+                      await page.waitForTimeout(500);
+                      break;
+                    }
                   }
-                  case 'click':
-                    await videoPage.click(action.selector);
-                    await videoPage.waitForTimeout(action.waitAfter || 500);
-                    break;
-                  case 'type':
-                    await videoPage.fill(action.selector, action.text);
-                    await videoPage.waitForTimeout(action.waitAfter || 300);
-                    break;
-                  case 'wait':
-                    await videoPage.waitForTimeout(action.ms || 1000);
-                    break;
-                  case 'navigate': {
-                    const navUrl = action.url.startsWith('http')
-                      ? action.url
-                      : `${config.baseUrl}${action.url}`;
-                    await videoPage.goto(navUrl, { waitUntil: 'networkidle' });
-                    await videoPage.waitForTimeout(500);
-                    break;
-                  }
+
+                  // Take screenshot after each action for slideshow
+                  const slidePath = path.join(
+                    artifactsDir,
+                    `${stepName}-slide-${String(slideIndex++).padStart(3, '0')}.png`,
+                  );
+                  await page.screenshot({ path: slidePath });
+                  slideshowScreenshots.push(slidePath);
                 }
               }
-            }
 
-            // Stop recording
-            await videoContext.close();
-
-            // Find the video file
-            const videoFiles = await fs.readdir(artifactsDir);
-            const latestVideo = videoFiles
-              .filter(f => f.endsWith('.webm'))
-              .sort()
-              .pop();
-
-            if (latestVideo) {
-              videoPath = path.join(artifactsDir, latestVideo);
-
-              // Convert to GIF if requested
-              if (config.videoFormat === 'gif') {
-                const stepName = step.name.replace(/\s+/g, '-').toLowerCase();
-                const gifPath = path.join(artifactsDir, `${stepName}.gif`);
-                console.log('   Converting video to GIF...');
-                const converted = await convertVideoToGif(videoPath, gifPath, config.gifQuality);
-                if (converted) {
+              // Create WebM slideshow from screenshots
+              if (slideshowScreenshots.length > 0) {
+                const slideshowPath = path.join(artifactsDir, `${stepName}-slideshow.webm`);
+                console.log(`   Creating slideshow from ${slideshowScreenshots.length} frames...`);
+                const created = await createSlideshowFromScreenshots(
+                  slideshowScreenshots,
+                  slideshowPath,
+                  config.slideshowFps || 2,
+                );
+                if (created) {
+                  videoPath = slideshowPath;
                   artifacts.push({
-                    type: 'gif',
+                    type: 'slideshow',
                     name: step.name,
-                    path: gifPath,
+                    path: slideshowPath,
+                    frameCount: slideshowScreenshots.length,
                     timestamp: Date.now(),
                     stepIndex,
                     stepName: step.name,
                   });
-                  // Remove original video
-                  await fs.unlink(videoPath).catch(() => {});
-                  console.log('   ✅ GIF created');
+                  // Clean up individual slideshow screenshots (keep explicit screenshots)
+                  for (const ssPath of slideshowScreenshots) {
+                    if (ssPath.includes('-slide-')) {
+                      await fs.unlink(ssPath).catch(() => {});
+                    }
+                  }
+                  console.log('   ✅ Slideshow created');
+                }
+              }
+            } else {
+              // Full video recording mode (webm or gif)
+              const videoContext = await browser.newContext({
+                viewport: config.viewport,
+                recordVideo: {
+                  dir: artifactsDir,
+                  size: config.viewport,
+                },
+              });
+              const videoPage = await videoContext.newPage();
+
+              // Navigate to the same URL as the main page or step URL
+              const stepUrl = step.url
+                ? step.url.startsWith('http')
+                  ? step.url
+                  : `${config.baseUrl}${step.url}`
+                : page.url();
+              await videoPage.goto(stepUrl, { waitUntil: 'networkidle' });
+              await videoPage.waitForTimeout(500);
+
+              // Execute actions
+              if (step.actions) {
+                for (const action of step.actions) {
+                  switch (action.type) {
+                    case 'screenshot': {
+                      const ssPath = path.join(artifactsDir, `${action.name || 'screenshot'}.png`);
+                      await videoPage.screenshot({
+                        path: ssPath,
+                        fullPage: action.fullPage !== false,
+                      });
+                      artifacts.push({
+                        type: 'screenshot',
+                        name: action.name || 'Screenshot',
+                        path: ssPath,
+                        timestamp: Date.now(),
+                        stepIndex,
+                        stepName: step.name,
+                      });
+                      break;
+                    }
+                    case 'click':
+                      await videoPage.click(action.selector);
+                      await videoPage.waitForTimeout(action.waitAfter || 500);
+                      break;
+                    case 'type':
+                      await videoPage.fill(action.selector, action.text);
+                      await videoPage.waitForTimeout(action.waitAfter || 300);
+                      break;
+                    case 'wait':
+                      await videoPage.waitForTimeout(action.ms || 1000);
+                      break;
+                    case 'navigate': {
+                      const navUrl = action.url.startsWith('http')
+                        ? action.url
+                        : `${config.baseUrl}${action.url}`;
+                      await videoPage.goto(navUrl, { waitUntil: 'networkidle' });
+                      await videoPage.waitForTimeout(500);
+                      break;
+                    }
+                  }
+                }
+              }
+
+              // Stop recording
+              await videoContext.close();
+
+              // Find the video file
+              const videoFiles = await fs.readdir(artifactsDir);
+              const latestVideo = videoFiles
+                .filter(f => f.endsWith('.webm'))
+                .sort()
+                .pop();
+
+              if (latestVideo) {
+                videoPath = path.join(artifactsDir, latestVideo);
+
+                // Convert to GIF if requested
+                if (config.videoFormat === 'gif') {
+                  const gifPath = path.join(artifactsDir, `${stepName}.gif`);
+                  console.log('   Converting video to GIF...');
+                  const converted = await convertVideoToGif(videoPath, gifPath, config.gifQuality);
+                  if (converted) {
+                    artifacts.push({
+                      type: 'gif',
+                      name: step.name,
+                      path: gifPath,
+                      timestamp: Date.now(),
+                      stepIndex,
+                      stepName: step.name,
+                    });
+                    // Remove original video
+                    await fs.unlink(videoPath).catch(() => {});
+                    console.log('   ✅ GIF created');
+                  } else {
+                    artifacts.push({
+                      type: 'video',
+                      name: step.name,
+                      path: videoPath,
+                      timestamp: Date.now(),
+                      stepIndex,
+                      stepName: step.name,
+                    });
+                  }
                 } else {
                   artifacts.push({
                     type: 'video',
@@ -1115,15 +1329,6 @@ async function runReview(config) {
                     stepName: step.name,
                   });
                 }
-              } else {
-                artifacts.push({
-                  type: 'video',
-                  name: step.name,
-                  path: videoPath,
-                  timestamp: Date.now(),
-                  stepIndex,
-                  stepName: step.name,
-                });
               }
             }
           } else {
@@ -1182,7 +1387,7 @@ async function runReview(config) {
     if (config.useAI !== false) {
       console.log('\n🎬 Extracting video frames for AI analysis...');
       for (const artifact of artifacts) {
-        if (artifact.type === 'video' || artifact.type === 'gif') {
+        if (artifact.type === 'video' || artifact.type === 'gif' || artifact.type === 'slideshow') {
           try {
             const frames = await extractVideoFrames(artifact.path, artifactsDir, 3);
             for (const frame of frames) {
