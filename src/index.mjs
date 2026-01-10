@@ -565,6 +565,7 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${config.title || 'Browser Review'}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/css-device-frames@1/dist/css-device-frames.min.css">
   <style>
     * {
       margin: 0;
@@ -726,51 +727,19 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
       color: #1d1d1f;
     }
 
-    /* Device frame styles */
-    .device-frame {
-      background: #1d1d1f;
-      border-radius: 12px;
-      padding: 8px 8px 8px 8px;
-      box-shadow:
-        0 25px 50px -12px rgba(0, 0, 0, 0.25),
-        0 0 0 1px rgba(255, 255, 255, 0.1) inset;
-      position: relative;
+    /* Device frame overrides */
+    .app-frame {
+      margin: 0;
     }
 
-    .device-frame::before {
-      content: '';
-      display: block;
-      height: 28px;
-      background: linear-gradient(180deg, #3a3a3c 0%, #2c2c2e 100%);
-      border-radius: 8px 8px 0 0;
-      margin: -8px -8px 8px -8px;
-      position: relative;
-    }
-
-    .device-frame::after {
-      content: '';
-      position: absolute;
-      top: 14px;
-      left: 16px;
-      width: 48px;
-      height: 10px;
-      display: flex;
-      background:
-        radial-gradient(circle, #ff5f57 4px, transparent 4px) 0 0,
-        radial-gradient(circle, #febc2e 4px, transparent 4px) 16px 0,
-        radial-gradient(circle, #28c840 4px, transparent 4px) 32px 0;
-      background-repeat: no-repeat;
-    }
-
-    .device-frame img,
-    .device-frame video {
+    .app-frame img,
+    .app-frame video {
       width: 100%;
       height: auto;
-      border-radius: 4px;
       display: block;
     }
 
-    .device-frame video {
+    .app-frame video {
       background: #000;
     }
 
@@ -935,7 +904,7 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
                 art => `
               <div class="artifact">
                 <h4>${art.name}</h4>
-                <div class="device-frame">
+                <div class="app-frame mac">
                   <img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />
                 </div>
                 <div class="artifact-info">
@@ -950,7 +919,7 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
                 art => `
               <div class="artifact">
                 <h4>${art.name}</h4>
-                <div class="device-frame">
+                <div class="app-frame mac">
                 ${
                   art.type === 'gif'
                     ? `<img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />`
@@ -992,7 +961,7 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
             art => `
           <div class="artifact">
             <h3>${art.name}</h3>
-            <div class="device-frame">
+            <div class="app-frame mac">
             ${
               art.type === 'screenshot'
                 ? `<img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />`
