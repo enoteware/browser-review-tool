@@ -2,339 +2,338 @@
 
 ## Executive Summary
 
-This document outlines the infrastructure for running Playwright browser automation on a Mac Mini server, with job queue and metadata stored in Neon PostgreSQL, and artifacts served via Vercel Blob. This approach provides full Playwright capabilities without serverless limitations.
+This document outlines the infrastructure for running Playwright browser automation on a Mac Mini server, exposed via Cloudflare Tunnel, with artifacts served via Vercel Blob. The Mac Mini runs an HTTP server that receives review requests directly from your Vercel app.
 
 ## Architecture Overview
 
 ```
-┌─────────────────┐         ┌──────────────────────┐
-│                 │         │                      │
-│   Vercel App    │────────▶│   Neon PostgreSQL    │
-│   (Frontend +   │         │   (Job Queue +       │
-│   API + Blob)   │         │    Metadata)         │
-│                 │         │                      │
-└────────▲────────┘         └──────────┬───────────┘
-         │                             │
-         │ uploads artifacts           │ polls for jobs
-         │                             ▼
-         │                  ┌──────────────────────┐
-         │                  │                      │
-         └──────────────────│   Mac Mini Server    │
-                            │   (Playwright +      │
-                            │    Job Runner)       │
-                            │                      │
-                            └──────────────────────┘
+┌─────────────────┐                              ┌──────────────────────┐
+│                 │   POST /review               │                      │
+│   Vercel App    │─────────────────────────────▶│  Cloudflare Tunnel   │
+│   (Frontend +   │                              │  (review.domain.com) │
+│   API)          │◀─────────────────────────────│                      │
+│                 │   { reportUrl, artifacts }   └──────────┬───────────┘
+└────────▲────────┘                                         │
+         │                                                  │
+         │ serves artifacts                                 ▼
+         │                                       ┌──────────────────────┐
+┌────────┴────────┐                              │                      │
+│                 │   uploads via @vercel/blob   │   Mac Mini Server    │
+│   Vercel Blob   │◀─────────────────────────────│   (Express +         │
+│   (Storage)     │                              │    Playwright)       │
+│                 │                              │                      │
+└─────────────────┘                              └──────────────────────┘
+                                                           │
+                                                           ▼
+                                                 ┌──────────────────────┐
+                                                 │                      │
+                                                 │   Neon PostgreSQL    │
+                                                 │   (Job History)      │
+                                                 │                      │
+                                                 └──────────────────────┘
 ```
 
-## Why Mac Mini Over Serverless?
+## Request Flow
 
-| Feature | Mac Mini | Cloudflare Workers |
-|---------|----------|-------------------|
-| Full Playwright | ✅ Yes | ❌ Puppeteer only |
-| Video recording | ✅ Native WebM/GIF | ❌ Screenshots only |
-| CPU time limit | ✅ Unlimited | ❌ 30 seconds |
-| Memory | ✅ 8-16GB+ | ❌ 128MB |
-| Browser choice | ✅ Chrome/Firefox/Safari | ❌ Managed Chromium |
-| Cost | ✅ Already owned | 💰 ~$20/mo for rendering |
-| Complexity | ✅ Simple Node.js | ❌ Worker limitations |
+```
+You click "Generate Review"
+         │
+         ▼
+Vercel API (api/review/generate.ts)
+         │
+         │  POST https://review.yourdomain.com/review
+         │  { title, url, steps, viewports }
+         ▼
+Cloudflare Tunnel → Mac Mini Express Server
+         │
+         ├── Runs Playwright (screenshots, video)
+         ├── Generates HTML report
+         ├── Uploads to Vercel Blob
+         ├── Saves job record to Neon
+         │
+         ▼
+Returns { reportUrl, artifacts[] }
+         │
+         ▼
+You see the report
+```
 
 ## Components
 
 ### 1. Vercel Application (Frontend + API)
 
-**Role**: User interface and job submission
+**Role**: User interface and API gateway
 
 **Responsibilities**:
 - Serve web interface for review configuration
-- Submit jobs to Neon database
-- Return job status and results
-- Proxy artifact URLs from R2
+- Proxy review requests to Mac Mini
+- Return report URLs to user
 
 **API Routes**:
 ```
 api/
 ├── review/
-│   ├── submit.ts      # Submit new review job → INSERT into Neon
-│   ├── status/[id].ts # Check job status → SELECT from Neon
-│   └── result/[id].ts # Get job result/artifacts
-└── health.ts          # Health check
+│   ├── generate.ts   # Proxy to Mac Mini → returns report URL
+│   └── history.ts    # List past reviews from Neon
+└── health.ts         # Health check
 ```
 
-### 2. Neon PostgreSQL (Job Queue)
-
-**Role**: Central job queue and metadata storage
-
-**Why Neon**:
-- Serverless PostgreSQL (scales to zero)
-- Already in your stack
-- No need for Redis/SQS complexity
-- Simple polling from Mac Mini
-
-### 3. Mac Mini Server (Job Runner)
+### 2. Mac Mini Server (via Cloudflare Tunnel)
 
 **Role**: Execute Playwright reviews
 
 **Setup**:
-- Node.js + existing `browser-review-tool` code
-- Long-running process that polls Neon for jobs
+- Express server on port 3001
+- Cloudflare Tunnel exposes as `https://review.yourdomain.com`
 - Full Playwright with all browsers
-- Real video recording capability
+- Uploads directly to Vercel Blob
 
-**Process Flow**:
-1. Poll Neon every 5 seconds for `status = 'pending'` jobs
-2. Claim job (set `status = 'running'`)
-3. Execute Playwright review using existing `src/index.mjs`
-4. Upload artifacts to Vercel Blob
-5. Update job with results (set `status = 'completed'`)
+**Endpoints**:
+```
+POST /review     - Run a review, return report URL
+GET  /health     - Health check
+```
+
+### 3. Cloudflare Tunnel
+
+**Role**: Secure exposure of Mac Mini to internet
+
+**Benefits**:
+- No port forwarding needed
+- No static IP needed
+- Automatic HTTPS
+- DDoS protection
+- Free
 
 ### 4. Vercel Blob (Storage)
 
 **Role**: Artifact storage with CDN
 
-**Benefits**:
-- Simple `put()` API from `@vercel/blob`
-- Automatic CDN via Vercel Edge Network
-- Already part of Vercel ecosystem (no extra accounts)
-- Returns public URLs directly
+**Stores**:
+- Screenshots (PNG)
+- Videos (WebM)
+- HTML reports
+
+### 5. Neon PostgreSQL (Optional)
+
+**Role**: Job history and metadata
+
+**Stores**:
+- Review history
+- Artifact URLs
+- Error logs
 
 ## Implementation
 
-### Phase 1: Database Schema
-
-```sql
--- Review Jobs table
-CREATE TABLE review_jobs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  title VARCHAR(255) NOT NULL,
-  url TEXT NOT NULL,
-  config JSONB NOT NULL,
-  status VARCHAR(50) DEFAULT 'pending',
-  -- pending → running → completed | failed
-  worker_id VARCHAR(100),        -- Mac Mini identifier
-  created_at TIMESTAMP DEFAULT NOW(),
-  started_at TIMESTAMP,
-  completed_at TIMESTAMP,
-  error_message TEXT,
-  retry_count INTEGER DEFAULT 0
-);
-
--- Artifacts table
-CREATE TABLE review_artifacts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  job_id UUID REFERENCES review_jobs(id) ON DELETE CASCADE,
-  type VARCHAR(50) NOT NULL,     -- 'screenshot', 'video', 'slideshow', 'report'
-  name VARCHAR(255),
-  blob_url TEXT NOT NULL,        -- Vercel Blob public URL
-  viewport VARCHAR(50),          -- 'desktop', 'mobile'
-  step_index INTEGER,
-  file_size INTEGER,
-  metadata JSONB,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Indexes for polling
-CREATE INDEX idx_jobs_pending ON review_jobs(status, created_at)
-  WHERE status = 'pending';
-CREATE INDEX idx_jobs_status ON review_jobs(status);
-CREATE INDEX idx_artifacts_job ON review_artifacts(job_id);
-```
-
-### Phase 2: Vercel API - Submit Job
-
-```typescript
-// api/review/submit.ts
-import { neon } from "@neondatabase/serverless";
-
-export async function POST(request: Request) {
-  const sql = neon(process.env.DATABASE_URL!);
-  const body = await request.json();
-
-  const { title, url, baseUrl, steps, viewports, useAI, clientRequest } = body;
-
-  // Validate required fields
-  if (!title || !url) {
-    return Response.json({ error: "title and url required" }, { status: 400 });
-  }
-
-  // Insert job
-  const [job] = await sql`
-    INSERT INTO review_jobs (title, url, config, status)
-    VALUES (
-      ${title},
-      ${url},
-      ${JSON.stringify({ baseUrl, steps, viewports, useAI, clientRequest })},
-      'pending'
-    )
-    RETURNING id, created_at
-  `;
-
-  return Response.json({
-    jobId: job.id,
-    status: "pending",
-    createdAt: job.created_at
-  });
-}
-```
-
-### Phase 3: Mac Mini Job Runner
+### Phase 1: Mac Mini Server
 
 ```javascript
-// runner/job-runner.mjs
-import { neon } from "@neondatabase/serverless";
+// runner/server.mjs
+import express from "express";
 import { put } from "@vercel/blob";
-import { runReview } from "../src/index.mjs";
+import { chromium } from "playwright";
 import fs from "fs/promises";
 import path from "path";
+import { randomUUID } from "crypto";
 
-const WORKER_ID = process.env.WORKER_ID || `mac-mini-${Date.now()}`;
-const POLL_INTERVAL = 5000; // 5 seconds
+const app = express();
+app.use(express.json());
 
-async function claimJob(sql) {
-  // Atomically claim oldest pending job
-  const [job] = await sql`
-    UPDATE review_jobs
-    SET status = 'running',
-        worker_id = ${WORKER_ID},
-        started_at = NOW()
-    WHERE id = (
-      SELECT id FROM review_jobs
-      WHERE status = 'pending'
-      ORDER BY created_at ASC
-      LIMIT 1
-      FOR UPDATE SKIP LOCKED
-    )
-    RETURNING *
-  `;
-  return job;
+const API_SECRET = process.env.API_SECRET;
+
+// Auth middleware
+function authenticate(req, res, next) {
+  const token = req.headers.authorization?.replace("Bearer ", "");
+  if (token !== API_SECRET) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
 }
 
-async function uploadToBlob(pathname, content, contentType) {
-  const blob = await put(pathname, content, {
-    access: "public",
-    contentType,
-    token: process.env.BLOB_READ_WRITE_TOKEN,
-  });
-  return blob.url;
-}
+// Health check (no auth)
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
 
-async function processJob(sql, job) {
-  const config = {
-    title: job.title,
-    url: job.url,
-    outputDir: `/tmp/reviews/${job.id}`,
-    ...job.config
-  };
+// Main review endpoint
+app.post("/review", authenticate, async (req, res) => {
+  const jobId = randomUUID();
+  const { title, url, baseUrl, steps, viewports, useAI } = req.body;
+
+  console.log(`📋 Starting job ${jobId}: ${title}`);
 
   try {
-    // Run the review using existing code
-    await runReview(config);
+    const outputDir = `/tmp/reviews/${jobId}`;
+    const artifactsDir = path.join(outputDir, "artifacts");
+    await fs.mkdir(artifactsDir, { recursive: true });
 
-    // Upload artifacts to Vercel Blob
-    const artifactsDir = path.join(config.outputDir, "artifacts");
-    const files = await fs.readdir(artifactsDir);
+    // Launch browser
+    const browser = await chromium.launch({ headless: true });
+    const artifacts = [];
 
-    for (const file of files) {
-      const filePath = path.join(artifactsDir, file);
-      const content = await fs.readFile(filePath);
-      const blobUrl = await uploadToBlob(
-        `reviews/${job.id}/${file}`,
-        content,
-        getMimeType(file)
-      );
+    // Process each viewport
+    for (const viewport of viewports || [{ name: "desktop", width: 1920, height: 1080 }]) {
+      const context = await browser.newContext({
+        viewport: { width: viewport.width, height: viewport.height }
+      });
+      const page = await context.newPage();
 
-      // Record artifact in database
-      await sql`
-        INSERT INTO review_artifacts (job_id, type, name, blob_url)
-        VALUES (${job.id}, ${getArtifactType(file)}, ${file}, ${blobUrl})
-      `;
+      // Navigate to URL
+      const targetUrl = url.startsWith("http") ? url : `${baseUrl}${url}`;
+      await page.goto(targetUrl, { waitUntil: "networkidle" });
+      await page.waitForTimeout(1000);
+
+      // Take screenshot
+      const screenshotName = `${viewport.name}-screenshot.png`;
+      const screenshotPath = path.join(artifactsDir, screenshotName);
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+
+      // Upload to Blob
+      const screenshotBuffer = await fs.readFile(screenshotPath);
+      const blob = await put(`reviews/${jobId}/${screenshotName}`, screenshotBuffer, {
+        access: "public",
+        contentType: "image/png",
+        token: process.env.BLOB_READ_WRITE_TOKEN,
+      });
+
+      artifacts.push({
+        type: "screenshot",
+        name: screenshotName,
+        viewport: viewport.name,
+        url: blob.url,
+      });
+
+      await context.close();
     }
 
-    // Upload HTML report
-    const reportPath = path.join(config.outputDir, "index.html");
-    const reportContent = await fs.readFile(reportPath);
-    const reportUrl = await uploadToBlob(
-      `reviews/${job.id}/index.html`,
-      reportContent,
-      "text/html"
-    );
+    await browser.close();
 
-    await sql`
-      INSERT INTO review_artifacts (job_id, type, name, blob_url)
-      VALUES (${job.id}, 'report', 'index.html', ${reportUrl})
-    `;
+    // Generate and upload HTML report
+    const reportHtml = generateReport(title, url, artifacts);
+    const reportBlob = await put(`reviews/${jobId}/index.html`, reportHtml, {
+      access: "public",
+      contentType: "text/html",
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+    });
 
-    // Mark job complete
-    await sql`
-      UPDATE review_jobs
-      SET status = 'completed', completed_at = NOW()
-      WHERE id = ${job.id}
-    `;
-
-    console.log(`✅ Job ${job.id} completed`);
-    console.log(`📄 Report: ${reportUrl}`);
+    console.log(`✅ Job ${jobId} completed`);
 
     // Cleanup temp files
-    await fs.rm(config.outputDir, { recursive: true, force: true });
+    await fs.rm(outputDir, { recursive: true, force: true });
+
+    // Return result
+    res.json({
+      success: true,
+      jobId,
+      reportUrl: reportBlob.url,
+      artifacts,
+    });
 
   } catch (error) {
-    console.error(`❌ Job ${job.id} failed:`, error.message);
-
-    await sql`
-      UPDATE review_jobs
-      SET status = 'failed',
-          error_message = ${error.message},
-          completed_at = NOW()
-      WHERE id = ${job.id}
-    `;
+    console.error(`❌ Job ${jobId} failed:`, error.message);
+    res.status(500).json({
+      success: false,
+      jobId,
+      error: error.message,
+    });
   }
+});
+
+function generateReport(title, url, artifacts) {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <title>${title}</title>
+  <style>
+    body { font-family: system-ui; max-width: 1200px; margin: 0 auto; padding: 20px; }
+    h1 { color: #333; }
+    .artifact { margin: 20px 0; }
+    .artifact img { max-width: 100%; border: 1px solid #ddd; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>${title}</h1>
+  <p>URL: ${url}</p>
+  <p>Generated: ${new Date().toISOString()}</p>
+  ${artifacts.map(a => `
+    <div class="artifact">
+      <h3>${a.name} (${a.viewport})</h3>
+      <img src="${a.url}" alt="${a.name}" />
+    </div>
+  `).join("")}
+</body>
+</html>`;
 }
 
-function getMimeType(filename) {
-  const ext = path.extname(filename).toLowerCase();
-  const types = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webm": "video/webm",
-    ".gif": "image/gif",
-    ".html": "text/html",
-  };
-  return types[ext] || "application/octet-stream";
-}
-
-function getArtifactType(filename) {
-  if (filename.endsWith(".png") || filename.endsWith(".jpg")) return "screenshot";
-  if (filename.endsWith(".webm")) return "video";
-  if (filename.endsWith(".gif")) return "gif";
-  return "other";
-}
-
-async function main() {
-  const sql = neon(process.env.DATABASE_URL);
-
-  console.log(`🚀 Job runner started (worker: ${WORKER_ID})`);
-  console.log(`📡 Polling every ${POLL_INTERVAL / 1000}s...`);
-
-  while (true) {
-    try {
-      const job = await claimJob(sql);
-
-      if (job) {
-        console.log(`📋 Processing job ${job.id}: ${job.title}`);
-        await processJob(sql, job);
-      }
-    } catch (error) {
-      console.error("Poll error:", error.message);
-    }
-
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
-  }
-}
-
-main();
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`🚀 Review server running on port ${PORT}`);
+});
 ```
 
-### Phase 4: Mac Mini Setup
+### Phase 2: Cloudflare Tunnel Setup
+
+```bash
+# On Mac Mini
+
+# 1. Install cloudflared
+brew install cloudflared
+
+# 2. Login to Cloudflare
+cloudflared tunnel login
+
+# 3. Create tunnel
+cloudflared tunnel create browser-review
+
+# 4. Configure tunnel (creates ~/.cloudflared/config.yml)
+cat > ~/.cloudflared/config.yml << EOF
+tunnel: browser-review
+credentials-file: /Users/YOU/.cloudflared/TUNNEL_ID.json
+
+ingress:
+  - hostname: review.yourdomain.com
+    service: http://localhost:3001
+  - service: http_status:404
+EOF
+
+# 5. Add DNS record (run once)
+cloudflared tunnel route dns browser-review review.yourdomain.com
+
+# 6. Run tunnel (use PM2 for production)
+cloudflared tunnel run browser-review
+```
+
+### Phase 3: Vercel API Route
+
+```typescript
+// api/review/generate.ts
+export async function POST(request: Request) {
+  const body = await request.json();
+
+  // Call Mac Mini via Cloudflare Tunnel
+  const response = await fetch(process.env.MAC_MINI_URL + "/review", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${process.env.MAC_MINI_SECRET}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const result = await response.json();
+
+  if (!result.success) {
+    return Response.json({ error: result.error }, { status: 500 });
+  }
+
+  return Response.json({
+    reportUrl: result.reportUrl,
+    artifacts: result.artifacts,
+  });
+}
+```
+
+### Phase 4: Mac Mini Setup (Complete)
 
 ```bash
 # On Mac Mini
@@ -345,21 +344,28 @@ cd browser-review-tool
 
 # 2. Install dependencies
 npm install
+npm install express
 npx playwright install
 
-# 3. Create .env for runner
-cat > .env.runner << EOF
-DATABASE_URL=postgres://...@...neon.tech/reviews
-BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...  # From Vercel Dashboard
-WORKER_ID=mac-mini-1
-OPENAI_API_KEY=sk-...  # For AI descriptions
+# 3. Create .env
+cat > .env << EOF
+PORT=3001
+API_SECRET=your-secret-token-here
+BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...
+OPENAI_API_KEY=sk-...
 EOF
 
-# 4. Run with PM2 for process management
+# 4. Set up PM2 for server
 npm install -g pm2
-pm2 start runner/job-runner.mjs --name browser-review-runner
+pm2 start runner/server.mjs --name review-server
 pm2 save
-pm2 startup  # Enable auto-start on boot
+
+# 5. Set up PM2 for Cloudflare Tunnel
+pm2 start cloudflared --name cf-tunnel -- tunnel run browser-review
+pm2 save
+
+# 6. Enable auto-start on boot
+pm2 startup
 ```
 
 ## Environment Variables
@@ -367,16 +373,16 @@ pm2 startup  # Enable auto-start on boot
 ### Vercel
 
 ```bash
-DATABASE_URL=postgres://...@...neon.tech/reviews
-BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...  # Auto-created when you add Blob storage
+MAC_MINI_URL=https://review.yourdomain.com
+MAC_MINI_SECRET=your-secret-token-here
 ```
 
-### Mac Mini Runner
+### Mac Mini
 
 ```bash
-DATABASE_URL=postgres://...@...neon.tech/reviews
-BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...  # Same token, get from Vercel Dashboard
-WORKER_ID=mac-mini-1
+PORT=3001
+API_SECRET=your-secret-token-here
+BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...
 OPENAI_API_KEY=sk-...
 ```
 
@@ -385,87 +391,63 @@ OPENAI_API_KEY=sk-...
 | Component | Cost |
 |-----------|------|
 | Mac Mini | $0 (already owned) |
-| Neon PostgreSQL | $0 (free tier: 0.5GB) |
-| Vercel Blob | Included with Pro ($20/mo includes 1GB, then $0.15/GB) |
-| Vercel | $0 (hobby) or $20/mo (pro) |
+| Cloudflare Tunnel | $0 (free) |
+| Vercel Blob | Included with Pro |
+| Vercel | $0-20/mo |
+| Neon (optional) | $0 (free tier) |
 | **Total** | **$0-20/mo** |
-
-Note: Vercel Hobby includes limited Blob storage. Pro plan recommended for production.
-
-## Scaling Considerations
-
-### Single Mac Mini (Current)
-- ~100-500 reviews/day capacity
-- Sequential processing
-- Simple to manage
-
-### Multiple Workers (Future)
-- Add more Mac Minis or cloud VMs
-- Each polls same Neon queue
-- `FOR UPDATE SKIP LOCKED` prevents duplicate processing
-- Horizontal scaling as needed
-
-### Optimization Options
-1. **Browser pooling**: Keep browser instances warm
-2. **Parallel viewports**: Run desktop/mobile simultaneously
-3. **Priority queue**: Add `priority` column for urgent jobs
-4. **Scheduled jobs**: Add `scheduled_for` timestamp
 
 ## Security
 
-1. **Database**: Neon connection requires SSL
-2. **Blob token**: Keep `BLOB_READ_WRITE_TOKEN` secret, never commit
-3. **Job validation**: Sanitize URLs, limit domains
-4. **Runner isolation**: Each job in temp directory, cleaned after
+1. **API Secret**: Shared secret between Vercel and Mac Mini
+2. **Cloudflare Tunnel**: Encrypted connection, no exposed ports
+3. **URL Validation**: Sanitize and validate target URLs
+4. **Rate Limiting**: Add express-rate-limit if needed
 5. **Secrets**: Use `.env` files, add to `.gitignore`
 
-## Monitoring
+## Testing
 
-```javascript
-// Simple health check endpoint
-// api/health.ts
-export async function GET() {
-  const sql = neon(process.env.DATABASE_URL);
+```bash
+# Test Mac Mini server directly
+curl -X POST http://localhost:3001/review \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-secret-token-here" \
+  -d '{
+    "title": "Test Review",
+    "url": "https://example.com",
+    "viewports": [{"name": "desktop", "width": 1920, "height": 1080}]
+  }'
 
-  const [stats] = await sql`
-    SELECT
-      COUNT(*) FILTER (WHERE status = 'pending') as pending,
-      COUNT(*) FILTER (WHERE status = 'running') as running,
-      COUNT(*) FILTER (WHERE status = 'completed' AND completed_at > NOW() - INTERVAL '1 hour') as completed_1h,
-      COUNT(*) FILTER (WHERE status = 'failed' AND completed_at > NOW() - INTERVAL '1 hour') as failed_1h
-    FROM review_jobs
-  `;
-
-  return Response.json({
-    queue: stats,
-    timestamp: new Date().toISOString()
-  });
-}
+# Test via Cloudflare Tunnel
+curl -X POST https://review.yourdomain.com/review \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-secret-token-here" \
+  -d '{"title": "Test", "url": "https://example.com"}'
 ```
 
 ## Next Steps
 
 ### Immediate
-1. [ ] Create Neon database and run schema migration
-2. [ ] Enable Vercel Blob storage in project settings
-3. [ ] Create `runner/` directory with job runner code
-4. [ ] Test job runner locally before deploying to Mac Mini
+1. [ ] Install Express and update runner/server.mjs
+2. [ ] Set up Cloudflare Tunnel on Mac Mini
+3. [ ] Configure DNS for review.yourdomain.com
+4. [ ] Test end-to-end flow
 
 ### Short-term
-5. [ ] Add Vercel API routes for job submission
-6. [ ] Update web interface to submit jobs via API
-7. [ ] Deploy job runner to Mac Mini with PM2
-8. [ ] Add job status polling to web interface
+5. [ ] Add Vercel API route to proxy requests
+6. [ ] Add multi-step review support
+7. [ ] Add video/slideshow recording
+8. [ ] Integrate existing HTML report template
 
 ### Medium-term
-9. [ ] Add retry logic for failed jobs
-10. [ ] Implement job cancellation
-11. [ ] Add webhook notifications on completion
-12. [ ] Build job history/management UI
+9. [ ] Add Neon for job history
+10. [ ] Add AI descriptions
+11. [ ] Build review history UI
+12. [ ] Add webhook notifications
 
 ## References
 
+- [Cloudflare Tunnel Docs](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
 - [Vercel Blob Documentation](https://vercel.com/docs/storage/vercel-blob)
-- [Neon Serverless Driver](https://neon.tech/docs/serverless/serverless-driver)
-- [PM2 Process Manager](https://pm2.keymetrics.io/)
 - [Playwright Documentation](https://playwright.dev/)
+- [PM2 Process Manager](https://pm2.keymetrics.io/)
