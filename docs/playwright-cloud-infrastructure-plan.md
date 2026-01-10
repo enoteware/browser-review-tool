@@ -2,232 +2,113 @@
 
 ## Executive Summary
 
-This document outlines the cloud infrastructure architecture for running Playwright browser automation in the cloud, enabling browser review tool execution without requiring local browser installation.
+This document outlines the infrastructure for running Playwright browser automation on a Mac Mini server, with job queue and metadata stored in Neon PostgreSQL. This approach provides full Playwright capabilities without serverless limitations.
 
-## Current State
-
-### Local Execution (Current)
-- Playwright runs locally via `chromium.launch()`
-- Requires `npx playwright install` on user machine
-- Screenshots and recordings saved to local `review-reports/` directory
-- Reports deployed manually via Vercel CLI
-
-### Limitations
-- Requires Node.js and Playwright installation
-- Browser binaries are ~500MB+
-- Not suitable for serverless/web-based execution
-- Can't run in CI/CD without browser setup
-
-## Proposed Architecture
-
-### Overview
+## Architecture Overview
 
 ```
-┌─────────────────┐     ┌──────────────────────┐     ┌─────────────────┐
-│                 │     │                      │     │                 │
-│   Vercel App    │────▶│  Cloudflare Workers  │────▶│  Cloudflare R2  │
-│   (Frontend +   │     │  (Browser Rendering) │     │  (Artifact      │
-│   API Routes)   │     │                      │     │   Storage)      │
-│                 │     │                      │     │                 │
-└────────┬────────┘     └──────────────────────┘     └─────────────────┘
-         │                                                    │
-         │              ┌──────────────────────┐              │
-         │              │                      │              │
-         └─────────────▶│   Neon PostgreSQL    │◀─────────────┘
-                        │   (Job Queue +       │
-                        │    Metadata)         │
-                        │                      │
-                        └──────────────────────┘
+┌─────────────────┐         ┌──────────────────────┐
+│                 │         │                      │
+│   Vercel App    │────────▶│   Neon PostgreSQL    │
+│   (Frontend +   │         │   (Job Queue +       │
+│   API Routes)   │         │    Metadata)         │
+│                 │         │                      │
+└─────────────────┘         └──────────┬───────────┘
+                                       │
+                                       │ polls for jobs
+                                       ▼
+                            ┌──────────────────────┐
+                            │                      │
+                            │   Mac Mini Server    │
+                            │   (Playwright +      │
+                            │    Job Runner)       │
+                            │                      │
+                            └──────────┬───────────┘
+                                       │
+                                       │ uploads artifacts
+                                       ▼
+                            ┌──────────────────────┐
+                            │                      │
+                            │   Cloudflare R2      │
+                            │   (Artifact Storage) │
+                            │                      │
+                            └──────────────────────┘
 ```
 
-### Components
+## Why Mac Mini Over Serverless?
 
-#### 1. Vercel Application (Frontend + API)
-- **Role**: User interface and API gateway
-- **Responsibilities**:
-  - Serve web interface for review configuration
-  - Accept review job submissions via API
-  - Return job status and results
-  - Serve generated reports from R2
+| Feature | Mac Mini | Cloudflare Workers |
+|---------|----------|-------------------|
+| Full Playwright | ✅ Yes | ❌ Puppeteer only |
+| Video recording | ✅ Native WebM/GIF | ❌ Screenshots only |
+| CPU time limit | ✅ Unlimited | ❌ 30 seconds |
+| Memory | ✅ 8-16GB+ | ❌ 128MB |
+| Browser choice | ✅ Chrome/Firefox/Safari | ❌ Managed Chromium |
+| Cost | ✅ Already owned | 💰 ~$20/mo for rendering |
+| Complexity | ✅ Simple Node.js | ❌ Worker limitations |
 
-#### 2. Cloudflare Workers (Browser Rendering)
-- **Role**: Headless browser execution
-- **Technology**: Cloudflare Browser Rendering with `@cloudflare/puppeteer`
-- **Responsibilities**:
-  - Execute Playwright/Puppeteer scripts
-  - Capture screenshots and video frames
-  - Create slideshow recordings
-  - Upload artifacts to R2
-- **Constraints**:
-  - 30-second CPU time limit per request
-  - Must use Cloudflare's Puppeteer fork (not standard Playwright)
-  - One browser session per Worker invocation
+## Components
 
-#### 3. Cloudflare R2 (Storage)
-- **Role**: Artifact storage
-- **Responsibilities**:
-  - Store screenshots (PNG)
-  - Store recordings (WebM slideshows)
-  - Store generated HTML reports
-  - Serve static assets with CDN
-- **Benefits**:
-  - No egress fees
-  - S3-compatible API
-  - Global CDN distribution
+### 1. Vercel Application (Frontend + API)
 
-#### 4. Neon PostgreSQL (Database)
-- **Role**: Job queue and metadata storage
-- **Responsibilities**:
-  - Store review job configurations
-  - Track job status (pending, running, completed, failed)
-  - Store artifact metadata and URLs
-  - Enable job history and auditing
+**Role**: User interface and job submission
 
-## Implementation Phases
+**Responsibilities**:
+- Serve web interface for review configuration
+- Submit jobs to Neon database
+- Return job status and results
+- Proxy artifact URLs from R2
 
-### Phase 1: Cloudflare Worker Setup
-
-#### 1.1 Create Worker Project
-
-```bash
-# Initialize Cloudflare Worker
-npm create cloudflare@latest browser-review-worker
-cd browser-review-worker
-```
-
-#### 1.2 Configure wrangler.toml
-
-```toml
-name = "browser-review-worker"
-main = "src/index.ts"
-compatibility_date = "2024-01-01"
-compatibility_flags = ["nodejs_compat"]
-
-# Enable Browser Rendering
-browser = { binding = "BROWSER" }
-
-# R2 bucket binding
-[[r2_buckets]]
-binding = "BUCKET"
-bucket_name = "browser-review-artifacts"
-
-# Environment variables
-[vars]
-ENVIRONMENT = "production"
-```
-
-#### 1.3 Worker Implementation
-
-```typescript
-// src/index.ts
-import puppeteer from "@cloudflare/puppeteer";
-
-interface ReviewConfig {
-  url: string;
-  title: string;
-  viewport?: { width: number; height: number };
-  actions?: Action[];
-}
-
-interface Action {
-  type: "screenshot" | "click" | "type" | "wait" | "scroll";
-  selector?: string;
-  text?: string;
-  ms?: number;
-  x?: number;
-  y?: number;
-  name?: string;
-}
-
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method !== "POST") {
-      return new Response("Method not allowed", { status: 405 });
-    }
-
-    const config: ReviewConfig = await request.json();
-    const browser = await puppeteer.launch(env.BROWSER);
-
-    try {
-      const page = await browser.newPage();
-      await page.setViewport(config.viewport || { width: 1920, height: 1080 });
-      await page.goto(config.url, { waitUntil: "networkidle0" });
-
-      const artifacts: string[] = [];
-
-      // Execute actions and capture screenshots
-      for (const action of config.actions || []) {
-        if (action.type === "screenshot") {
-          const screenshot = await page.screenshot({ fullPage: true });
-          const key = `${Date.now()}-${action.name || "screenshot"}.png`;
-          await env.BUCKET.put(key, screenshot);
-          artifacts.push(key);
-        }
-        // ... handle other action types
-      }
-
-      return Response.json({ success: true, artifacts });
-    } finally {
-      await browser.close();
-    }
-  }
-};
-```
-
-### Phase 2: Vercel API Integration
-
-#### 2.1 API Route Structure
-
+**API Routes**:
 ```
 api/
 ├── review/
-│   ├── submit.ts      # Submit new review job
-│   ├── status/[id].ts # Check job status
-│   └── result/[id].ts # Get job result/report
-├── webhook/
-│   └── cloudflare.ts  # Receive Worker completion callbacks
+│   ├── submit.ts      # Submit new review job → INSERT into Neon
+│   ├── status/[id].ts # Check job status → SELECT from Neon
+│   └── result/[id].ts # Get job result/artifacts
 └── health.ts          # Health check
 ```
 
-#### 2.2 Submit Review Endpoint
+### 2. Neon PostgreSQL (Job Queue)
 
-```typescript
-// api/review/submit.ts
-import { neon } from "@neondatabase/serverless";
+**Role**: Central job queue and metadata storage
 
-export default async function handler(req, res) {
-  const sql = neon(process.env.DATABASE_URL);
+**Why Neon**:
+- Serverless PostgreSQL (scales to zero)
+- Already in your stack
+- No need for Redis/SQS complexity
+- Simple polling from Mac Mini
 
-  const { title, url, steps, viewports } = req.body;
+### 3. Mac Mini Server (Job Runner)
 
-  // Create job in database
-  const [job] = await sql`
-    INSERT INTO review_jobs (title, url, config, status)
-    VALUES (${title}, ${url}, ${JSON.stringify({ steps, viewports })}, 'pending')
-    RETURNING id
-  `;
+**Role**: Execute Playwright reviews
 
-  // Trigger Cloudflare Worker
-  const workerResponse = await fetch(process.env.CLOUDFLARE_WORKER_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`
-    },
-    body: JSON.stringify({
-      jobId: job.id,
-      callbackUrl: `${process.env.VERCEL_URL}/api/webhook/cloudflare`,
-      config: { title, url, steps, viewports }
-    })
-  });
+**Setup**:
+- Node.js + existing `browser-review-tool` code
+- Long-running process that polls Neon for jobs
+- Full Playwright with all browsers
+- Real video recording capability
 
-  return res.json({ jobId: job.id, status: "pending" });
-}
-```
+**Process Flow**:
+1. Poll Neon every 5 seconds for `status = 'pending'` jobs
+2. Claim job (set `status = 'running'`)
+3. Execute Playwright review using existing `src/index.mjs`
+4. Upload artifacts to R2
+5. Update job with results (set `status = 'completed'`)
 
-### Phase 3: Database Schema
+### 4. Cloudflare R2 (Storage)
 
-#### 3.1 Neon PostgreSQL Schema
+**Role**: Artifact storage with CDN
+
+**Benefits**:
+- No egress fees
+- S3-compatible API
+- Global CDN for fast artifact delivery
+- Already configured in your setup
+
+## Implementation
+
+### Phase 1: Database Schema
 
 ```sql
 -- Review Jobs table
@@ -237,224 +118,381 @@ CREATE TABLE review_jobs (
   url TEXT NOT NULL,
   config JSONB NOT NULL,
   status VARCHAR(50) DEFAULT 'pending',
+  -- pending → running → completed | failed
+  worker_id VARCHAR(100),        -- Mac Mini identifier
   created_at TIMESTAMP DEFAULT NOW(),
   started_at TIMESTAMP,
   completed_at TIMESTAMP,
-  error_message TEXT
+  error_message TEXT,
+  retry_count INTEGER DEFAULT 0
 );
 
 -- Artifacts table
 CREATE TABLE review_artifacts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  job_id UUID REFERENCES review_jobs(id),
-  type VARCHAR(50) NOT NULL, -- 'screenshot', 'video', 'slideshow'
+  job_id UUID REFERENCES review_jobs(id) ON DELETE CASCADE,
+  type VARCHAR(50) NOT NULL,     -- 'screenshot', 'video', 'slideshow', 'report'
   name VARCHAR(255),
-  r2_key TEXT NOT NULL,
-  r2_url TEXT NOT NULL,
-  viewport VARCHAR(50),
+  storage_key TEXT NOT NULL,     -- R2 key
+  storage_url TEXT NOT NULL,     -- Public URL
+  viewport VARCHAR(50),          -- 'desktop', 'mobile'
   step_index INTEGER,
+  file_size INTEGER,
   metadata JSONB,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Reports table
-CREATE TABLE review_reports (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  job_id UUID REFERENCES review_jobs(id) UNIQUE,
-  r2_key TEXT NOT NULL,
-  r2_url TEXT NOT NULL,
-  public_url TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Indexes
+-- Indexes for polling
+CREATE INDEX idx_jobs_pending ON review_jobs(status, created_at)
+  WHERE status = 'pending';
 CREATE INDEX idx_jobs_status ON review_jobs(status);
-CREATE INDEX idx_jobs_created ON review_jobs(created_at);
 CREATE INDEX idx_artifacts_job ON review_artifacts(job_id);
 ```
 
-### Phase 4: R2 Storage Setup
-
-#### 4.1 Create R2 Bucket
-
-```bash
-# Using Wrangler CLI
-wrangler r2 bucket create browser-review-artifacts
-```
-
-#### 4.2 Configure CORS for Public Access
-
-```json
-{
-  "CORSRules": [
-    {
-      "AllowedOrigins": ["*"],
-      "AllowedMethods": ["GET", "HEAD"],
-      "AllowedHeaders": ["*"],
-      "MaxAgeSeconds": 3600
-    }
-  ]
-}
-```
-
-#### 4.3 R2 Upload Utility
+### Phase 2: Vercel API - Submit Job
 
 ```typescript
-// lib/r2-client.ts
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+// api/review/submit.ts
+import { neon } from "@neondatabase/serverless";
 
-export function createR2Client() {
-  return new S3Client({
-    region: "auto",
-    endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID!,
-      secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY!,
-    },
+export async function POST(request: Request) {
+  const sql = neon(process.env.DATABASE_URL!);
+  const body = await request.json();
+
+  const { title, url, baseUrl, steps, viewports, useAI, clientRequest } = body;
+
+  // Validate required fields
+  if (!title || !url) {
+    return Response.json({ error: "title and url required" }, { status: 400 });
+  }
+
+  // Insert job
+  const [job] = await sql`
+    INSERT INTO review_jobs (title, url, config, status)
+    VALUES (
+      ${title},
+      ${url},
+      ${JSON.stringify({ baseUrl, steps, viewports, useAI, clientRequest })},
+      'pending'
+    )
+    RETURNING id, created_at
+  `;
+
+  return Response.json({
+    jobId: job.id,
+    status: "pending",
+    createdAt: job.created_at
   });
 }
+```
 
-export async function uploadToR2(key: string, data: Buffer, contentType: string) {
-  const client = createR2Client();
-  await client.send(new PutObjectCommand({
-    Bucket: process.env.CLOUDFLARE_R2_BUCKET,
+### Phase 3: Mac Mini Job Runner
+
+```javascript
+// runner/job-runner.mjs
+import { neon } from "@neondatabase/serverless";
+import { runReview } from "../src/index.mjs";
+import { uploadToR2 } from "./r2-client.mjs";
+import fs from "fs/promises";
+import path from "path";
+
+const WORKER_ID = process.env.WORKER_ID || `mac-mini-${Date.now()}`;
+const POLL_INTERVAL = 5000; // 5 seconds
+
+async function claimJob(sql) {
+  // Atomically claim oldest pending job
+  const [job] = await sql`
+    UPDATE review_jobs
+    SET status = 'running',
+        worker_id = ${WORKER_ID},
+        started_at = NOW()
+    WHERE id = (
+      SELECT id FROM review_jobs
+      WHERE status = 'pending'
+      ORDER BY created_at ASC
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING *
+  `;
+  return job;
+}
+
+async function processJob(sql, job) {
+  const config = {
+    title: job.title,
+    url: job.url,
+    outputDir: `/tmp/reviews/${job.id}`,
+    ...job.config
+  };
+
+  try {
+    // Run the review using existing code
+    await runReview(config);
+
+    // Upload artifacts to R2
+    const artifactsDir = path.join(config.outputDir, "artifacts");
+    const files = await fs.readdir(artifactsDir);
+
+    for (const file of files) {
+      const filePath = path.join(artifactsDir, file);
+      const content = await fs.readFile(filePath);
+      const key = `${job.id}/${file}`;
+      const url = await uploadToR2(key, content);
+
+      // Record artifact in database
+      await sql`
+        INSERT INTO review_artifacts (job_id, type, name, storage_key, storage_url)
+        VALUES (${job.id}, ${getArtifactType(file)}, ${file}, ${key}, ${url})
+      `;
+    }
+
+    // Upload HTML report
+    const reportPath = path.join(config.outputDir, "index.html");
+    const reportContent = await fs.readFile(reportPath);
+    const reportKey = `${job.id}/index.html`;
+    const reportUrl = await uploadToR2(reportKey, reportContent, "text/html");
+
+    await sql`
+      INSERT INTO review_artifacts (job_id, type, name, storage_key, storage_url)
+      VALUES (${job.id}, 'report', 'index.html', ${reportKey}, ${reportUrl})
+    `;
+
+    // Mark job complete
+    await sql`
+      UPDATE review_jobs
+      SET status = 'completed', completed_at = NOW()
+      WHERE id = ${job.id}
+    `;
+
+    console.log(`✅ Job ${job.id} completed`);
+
+    // Cleanup temp files
+    await fs.rm(config.outputDir, { recursive: true, force: true });
+
+  } catch (error) {
+    console.error(`❌ Job ${job.id} failed:`, error.message);
+
+    await sql`
+      UPDATE review_jobs
+      SET status = 'failed',
+          error_message = ${error.message},
+          completed_at = NOW()
+      WHERE id = ${job.id}
+    `;
+  }
+}
+
+function getArtifactType(filename) {
+  if (filename.endsWith(".png") || filename.endsWith(".jpg")) return "screenshot";
+  if (filename.endsWith(".webm")) return "video";
+  if (filename.endsWith(".gif")) return "gif";
+  return "other";
+}
+
+async function main() {
+  const sql = neon(process.env.DATABASE_URL);
+
+  console.log(`🚀 Job runner started (worker: ${WORKER_ID})`);
+  console.log(`📡 Polling every ${POLL_INTERVAL / 1000}s...`);
+
+  while (true) {
+    try {
+      const job = await claimJob(sql);
+
+      if (job) {
+        console.log(`📋 Processing job ${job.id}: ${job.title}`);
+        await processJob(sql, job);
+      }
+    } catch (error) {
+      console.error("Poll error:", error.message);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+  }
+}
+
+main();
+```
+
+### Phase 4: R2 Upload Utility
+
+```javascript
+// runner/r2-client.mjs
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+
+const r2 = new S3Client({
+  region: "auto",
+  endpoint: `https://${process.env.CF_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+});
+
+const BUCKET = process.env.R2_BUCKET;
+const PUBLIC_URL = process.env.R2_PUBLIC_URL; // e.g., https://reviews.yourdomain.com
+
+export async function uploadToR2(key, data, contentType) {
+  const mimeTypes = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".webm": "video/webm",
+    ".gif": "image/gif",
+    ".html": "text/html",
+  };
+
+  const ext = key.substring(key.lastIndexOf("."));
+  const mime = contentType || mimeTypes[ext] || "application/octet-stream";
+
+  await r2.send(new PutObjectCommand({
+    Bucket: BUCKET,
     Key: key,
     Body: data,
-    ContentType: contentType,
+    ContentType: mime,
   }));
-  return `https://${process.env.CLOUDFLARE_R2_BUCKET}.${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com/${key}`;
+
+  return `${PUBLIC_URL}/${key}`;
 }
+```
+
+### Phase 5: Mac Mini Setup
+
+```bash
+# On Mac Mini
+
+# 1. Clone repository
+git clone https://github.com/enoteware/browser-review-tool.git
+cd browser-review-tool
+
+# 2. Install dependencies
+npm install
+npx playwright install
+
+# 3. Create .env for runner
+cat > .env.runner << EOF
+DATABASE_URL=postgres://...@...neon.tech/reviews
+CF_ACCOUNT_ID=your_cloudflare_account_id
+R2_ACCESS_KEY_ID=your_r2_access_key
+R2_SECRET_ACCESS_KEY=your_r2_secret
+R2_BUCKET=browser-review-artifacts
+R2_PUBLIC_URL=https://artifacts.yourdomain.com
+WORKER_ID=mac-mini-1
+OPENAI_API_KEY=sk-...  # For AI descriptions
+EOF
+
+# 4. Run with PM2 for process management
+npm install -g pm2
+pm2 start runner/job-runner.mjs --name browser-review-runner
+pm2 save
+pm2 startup  # Enable auto-start on boot
 ```
 
 ## Environment Variables
 
-### Vercel Environment Variables
+### Vercel
 
 ```bash
-# Cloudflare
-CLOUDFLARE_API_TOKEN=           # Workers API token
-CLOUDFLARE_ACCOUNT_ID=          # Account ID
-CLOUDFLARE_WORKER_URL=          # Deployed Worker URL
-CLOUDFLARE_R2_ACCESS_KEY_ID=    # R2 S3-compatible key
-CLOUDFLARE_R2_SECRET_ACCESS_KEY=# R2 S3-compatible secret
-CLOUDFLARE_R2_BUCKET=           # R2 bucket name
-
-# Neon
-DATABASE_URL=                   # Neon PostgreSQL connection string
-
-# Existing
-SITE_PASSWORD=                  # Web interface password
-OPENAI_API_KEY=                 # For AI descriptions
+DATABASE_URL=postgres://...@...neon.tech/reviews
 ```
 
-### Cloudflare Worker Environment
+### Mac Mini Runner
 
 ```bash
-# Set via wrangler secret
-wrangler secret put DATABASE_URL
-wrangler secret put CALLBACK_SECRET
+DATABASE_URL=postgres://...@...neon.tech/reviews
+CF_ACCOUNT_ID=your_cloudflare_account_id
+R2_ACCESS_KEY_ID=your_r2_access_key
+R2_SECRET_ACCESS_KEY=your_r2_secret
+R2_BUCKET=browser-review-artifacts
+R2_PUBLIC_URL=https://artifacts.yourdomain.com
+WORKER_ID=mac-mini-1
+OPENAI_API_KEY=sk-...
 ```
-
-## Cloudflare Browser Rendering Limitations
-
-### Important Constraints
-
-1. **CPU Time Limit**: 30 seconds max CPU time per request
-2. **Memory**: 128MB limit
-3. **Browser Version**: Uses Cloudflare's managed Chromium (not user-selectable)
-4. **No Playwright**: Must use `@cloudflare/puppeteer` (Puppeteer fork)
-5. **One Session Per Request**: Cannot maintain browser pools
-6. **No Video Recording**: Must use screenshot-based slideshows
-
-### Workarounds
-
-| Limitation | Workaround |
-|------------|------------|
-| No video recording | Capture screenshots, combine into slideshow WebM |
-| 30s CPU limit | Break long reviews into multiple Worker invocations |
-| No Playwright | Port Playwright actions to Puppeteer equivalents |
-| Memory limits | Process one viewport at a time |
-
-## Migration Path
-
-### From Local to Cloud Execution
-
-1. **Phase 1**: Keep local execution, add cloud as option
-   - `--cloud` flag triggers cloud execution
-   - Local remains default for development
-
-2. **Phase 2**: Web interface uses cloud by default
-   - CLI still supports local execution
-   - Web submissions always use cloud
-
-3. **Phase 3**: Full cloud migration
-   - Local execution for development only
-   - All production reviews via cloud
 
 ## Cost Estimation
 
-### Cloudflare (Pay-as-you-go)
+| Component | Cost |
+|-----------|------|
+| Mac Mini | $0 (already owned) |
+| Neon PostgreSQL | $0 (free tier: 0.5GB) |
+| Cloudflare R2 | $0-5/mo (10GB free, then $0.015/GB) |
+| Vercel | $0 (hobby) or $20/mo (pro) |
+| **Total** | **$0-25/mo** |
 
-| Service | Free Tier | Beyond Free |
-|---------|-----------|-------------|
-| Workers | 100K requests/day | $0.50/million |
-| Browser Rendering | Included with Workers Paid | ~$0.02/session |
-| R2 Storage | 10GB/month | $0.015/GB/month |
-| R2 Egress | Unlimited | $0 (no egress fees!) |
+## Scaling Considerations
 
-### Neon PostgreSQL
+### Single Mac Mini (Current)
+- ~100-500 reviews/day capacity
+- Sequential processing
+- Simple to manage
 
-| Tier | Included | Cost |
-|------|----------|------|
-| Free | 0.5GB storage, 1 project | $0 |
-| Launch | 10GB storage | $19/month |
+### Multiple Workers (Future)
+- Add more Mac Minis or cloud VMs
+- Each polls same Neon queue
+- `FOR UPDATE SKIP LOCKED` prevents duplicate processing
+- Horizontal scaling as needed
 
-### Estimated Monthly Cost
+### Optimization Options
+1. **Browser pooling**: Keep browser instances warm
+2. **Parallel viewports**: Run desktop/mobile simultaneously
+3. **Priority queue**: Add `priority` column for urgent jobs
+4. **Scheduled jobs**: Add `scheduled_for` timestamp
 
-For ~1000 reviews/month:
-- Workers: ~$0.50
-- Browser Rendering: ~$20
-- R2 Storage: ~$0.15 (10GB)
-- Neon: $0 (free tier)
-- **Total: ~$21/month**
+## Security
 
-## Security Considerations
+1. **Database**: Neon connection requires SSL
+2. **R2**: Signed URLs for private artifacts (optional)
+3. **Job validation**: Sanitize URLs, limit domains
+4. **Runner isolation**: Each job in temp directory, cleaned after
+5. **Secrets**: Use `.env` files, never commit
 
-1. **API Authentication**: All Worker endpoints require Bearer token
-2. **URL Validation**: Sanitize and validate review URLs
-3. **Rate Limiting**: Implement per-IP and per-user limits
-4. **Content Security**: Scan screenshots for sensitive content
-5. **Secrets Management**: Use Cloudflare Secrets and Vercel env vars
+## Monitoring
+
+```javascript
+// Simple health check endpoint
+// api/health.ts
+export async function GET() {
+  const sql = neon(process.env.DATABASE_URL);
+
+  const [stats] = await sql`
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'pending') as pending,
+      COUNT(*) FILTER (WHERE status = 'running') as running,
+      COUNT(*) FILTER (WHERE status = 'completed' AND completed_at > NOW() - INTERVAL '1 hour') as completed_1h,
+      COUNT(*) FILTER (WHERE status = 'failed' AND completed_at > NOW() - INTERVAL '1 hour') as failed_1h
+    FROM review_jobs
+  `;
+
+  return Response.json({
+    queue: stats,
+    timestamp: new Date().toISOString()
+  });
+}
+```
 
 ## Next Steps
 
-### Immediate Actions
+### Immediate
+1. [ ] Create Neon database and run schema migration
+2. [ ] Set up R2 bucket with public access
+3. [ ] Create `runner/` directory with job runner code
+4. [ ] Test job runner locally before deploying to Mac Mini
 
-1. [ ] Create Cloudflare API token with required permissions
-2. [ ] Create R2 bucket and API tokens
-3. [ ] Set up Neon database and run migrations
-4. [ ] Initialize Cloudflare Worker project
-5. [ ] Implement basic screenshot capture in Worker
+### Short-term
+5. [ ] Add Vercel API routes for job submission
+6. [ ] Update web interface to submit jobs via API
+7. [ ] Deploy job runner to Mac Mini with PM2
+8. [ ] Add job status polling to web interface
 
-### Short-term (1-2 weeks)
-
-6. [ ] Implement full action execution in Worker
-7. [ ] Add slideshow creation in Worker
-8. [ ] Create Vercel API routes
-9. [ ] Integrate web interface with cloud execution
-10. [ ] Add job status polling
-
-### Medium-term (2-4 weeks)
-
-11. [ ] Multi-viewport support
-12. [ ] AI description generation in cloud
-13. [ ] Report generation and hosting
-14. [ ] Job history and management UI
-15. [ ] Performance optimization
+### Medium-term
+9. [ ] Add retry logic for failed jobs
+10. [ ] Implement job cancellation
+11. [ ] Add webhook notifications on completion
+12. [ ] Build job history/management UI
 
 ## References
 
-- [Cloudflare Browser Rendering Docs](https://developers.cloudflare.com/browser-rendering/)
-- [Cloudflare R2 Docs](https://developers.cloudflare.com/r2/)
 - [Neon Serverless Driver](https://neon.tech/docs/serverless/serverless-driver)
-- [Vercel Serverless Functions](https://vercel.com/docs/functions)
+- [Cloudflare R2 Docs](https://developers.cloudflare.com/r2/)
+- [PM2 Process Manager](https://pm2.keymetrics.io/)
+- [Playwright Documentation](https://playwright.dev/)
