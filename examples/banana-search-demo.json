@@ -1,0 +1,67 @@
+{
+  "title": "Demo: Search for Banana Photos on DuckDuckGo",
+  "baseUrl": "https://duckduckgo.com",
+  "videoFormat": "slideshow",
+  "slideshowFps": 2,
+  "useAI": false,
+  "showCursor": true,
+  "headless": false,
+  "description": "Demonstrating the new lightweight slideshow format with scrolling and clicking",
+  "steps": [
+    {
+      "name": "Search for Bananas with Interactions",
+      "url": "/?q=bananas&iax=images&ia=images",
+      "description": "Searching DuckDuckGo for banana images with scrolling and clicking",
+      "record": true,
+      "actions": [
+        {
+          "type": "screenshot",
+          "name": "initial-page",
+          "fullPage": false
+        },
+        {
+          "type": "wait",
+          "ms": 1500
+        },
+        {
+          "type": "scroll",
+          "y": 500,
+          "waitAfter": 1000
+        },
+        {
+          "type": "screenshot",
+          "name": "after-scroll",
+          "fullPage": false
+        },
+        {
+          "type": "wait",
+          "ms": 1000
+        },
+        {
+          "type": "scroll",
+          "y": 500,
+          "waitAfter": 1000
+        },
+        {
+          "type": "screenshot",
+          "name": "after-second-scroll",
+          "fullPage": false
+        },
+        {
+          "type": "wait",
+          "ms": 1000
+        },
+        {
+          "type": "scroll",
+          "y": -300,
+          "waitAfter": 1000
+        },
+        {
+          "type": "screenshot",
+          "name": "scrolled-back-up",
+          "fullPage": false
+        }
+      ]
+    }
+  ]
+}

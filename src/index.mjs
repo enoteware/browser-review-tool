@@ -67,6 +67,10 @@ const DEFAULT_CONFIG = {
   baseUrl: process.env.BASE_URL || 'http://localhost:7777',
   outputDir: path.join(process.cwd(), 'review-reports'),
   viewport: { width: 1920, height: 1080 },
+  viewports: [
+    { name: 'desktop', width: 1920, height: 1080 },
+    { name: 'mobile', width: 375, height: 667 },
+  ],
   videoFormat: 'slideshow', // 'slideshow' (default, lightweight), 'webm' (full video), 'gif'
   slideshowFps: 2, // frames per second for slideshow
   gifQuality: 'medium', // 'low', 'medium', 'high'
@@ -75,6 +79,8 @@ const DEFAULT_CONFIG = {
   aiProvider: 'openai',
   aiModel: 'gpt-4o',
   maxScreenshotsPerStep: 10,
+  showCursor: true, // Show mouse cursor in recordings
+  headless: false, // Can run headless and still record
 };
 
 // Parse command line arguments
@@ -727,19 +733,27 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
       color: #1d1d1f;
     }
 
-    /* Device frame overrides */
-    .app-frame {
-      margin: 0;
+    /* Device frame styling */
+    .device-frame {
+      margin: 20px 0;
+      max-width: 100%;
     }
 
-    .app-frame img,
-    .app-frame video {
+    .device-frame-content {
+      width: 100%;
+      height: auto;
+    }
+
+    .device-frame-content img,
+    .device-frame-content video {
       width: 100%;
       height: auto;
       display: block;
+      border-radius: 0;
+      box-shadow: none;
     }
 
-    .app-frame video {
+    .device-frame-content video {
       background: #000;
     }
 
@@ -903,9 +917,11 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
               .map(
                 art => `
               <div class="artifact">
-                <h4>${art.name}</h4>
-                <div class="app-frame mac">
-                  <img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />
+                <h4>${art.name}${art.viewport ? ` (${art.viewport})` : ''}</h4>
+                <div class="device-frame ${art.viewport === 'mobile' ? 'device-iphone-14' : 'device-macbook-pro'}">
+                  <div class="device-frame-content">
+                    <img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />
+                  </div>
                 </div>
                 <div class="artifact-info">
                   ${art.timestamp ? `Captured: ${new Date(art.timestamp).toLocaleString()}` : ''}
@@ -918,18 +934,20 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
               .map(
                 art => `
               <div class="artifact">
-                <h4>${art.name}</h4>
-                <div class="app-frame mac">
+                <h4>${art.name}${art.viewport ? ` (${art.viewport})` : ''}</h4>
+                <div class="device-frame ${art.viewport === 'mobile' ? 'device-iphone-14' : 'device-macbook-pro'}">
+                  <div class="device-frame-content">
                 ${
                   art.type === 'gif'
                     ? `<img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />`
                     : `
-                  <video controls>
+                  <video controls loop autoplay muted>
                     <source src="artifacts/${path.basename(art.path)}" type="video/webm">
                     Your browser does not support the video tag.
                   </video>
                 `
                 }
+                  </div>
                 </div>
                 <div class="artifact-info">
                   ${art.duration ? `Duration: ${art.duration}s` : ''}
@@ -960,20 +978,22 @@ async function generateHTMLReport(config, artifacts, descriptions = null) {
           .map(
             art => `
           <div class="artifact">
-            <h3>${art.name}</h3>
-            <div class="app-frame mac">
+            <h3>${art.name}${art.viewport ? ` (${art.viewport})` : ''}</h3>
+            <div class="device-frame ${art.viewport === 'mobile' ? 'device-iphone-14' : 'device-macbook-pro'}">
+              <div class="device-frame-content">
             ${
               art.type === 'screenshot'
                 ? `<img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />`
                 : art.type === 'gif'
                   ? `<img src="artifacts/${path.basename(art.path)}" alt="${art.name}" />`
                   : `
-              <video controls>
+              <video controls loop autoplay muted>
                 <source src="artifacts/${path.basename(art.path)}" type="video/webm">
                 Your browser does not support the video tag.
               </video>
             `
             }
+              </div>
             </div>
             <div class="artifact-info">
               ${art.duration ? `Duration: ${art.duration}s` : ''}
@@ -1014,7 +1034,7 @@ async function runReview(config) {
     let browser;
     try {
       browser = await chromium.launch({
-        headless: false, // Non-headless for better recording
+        headless: config.headless !== false, // Use config setting, default to false
         args: ['--no-sandbox', '--disable-setuid-sandbox'], // For better compatibility
       });
     } catch (error) {
@@ -1024,14 +1044,28 @@ async function runReview(config) {
       throw new Error(msg);
     }
 
+    // Determine which viewports to record
+    let viewportsToRecord = config.viewports || [{ name: 'desktop', ...config.viewport }];
+    if (!Array.isArray(viewportsToRecord)) {
+      viewportsToRecord = [{ name: 'desktop', ...viewportsToRecord }];
+    }
+    // Ensure each viewport has a name
+    viewportsToRecord = viewportsToRecord.map((vp, idx) => ({
+      name: vp.name || (vp.width < 800 ? 'mobile' : 'desktop'),
+      width: vp.width || vp.viewport?.width || 1920,
+      height: vp.height || vp.viewport?.height || 1080,
+    }));
+
     try {
+      // Create main context with first viewport
+      const mainViewport = viewportsToRecord[0];
       const context = await browser.newContext({
-        viewport: config.viewport,
+        viewport: mainViewport.width && mainViewport.height ? { width: mainViewport.width, height: mainViewport.height } : mainViewport,
         recordVideo:
           config.videoFormat === 'webm'
             ? {
                 dir: artifactsDir,
-                size: config.viewport,
+                size: mainViewport.width && mainViewport.height ? { width: mainViewport.width, height: mainViewport.height } : mainViewport,
               }
             : undefined,
       });
@@ -1126,12 +1160,32 @@ async function runReview(config) {
                       break;
                     }
                     case 'click':
-                      await page.click(action.selector);
+                      // Add visual indicator for click
+                      if (config.showCursor) {
+                        await page.evaluate((selector) => {
+                          const el = document.querySelector(selector);
+                          if (el) {
+                            el.style.outline = '3px solid #007AFF';
+                            el.style.outlineOffset = '2px';
+                            setTimeout(() => {
+                              el.style.outline = '';
+                              el.style.outlineOffset = '';
+                            }, 500);
+                          }
+                        }, action.selector);
+                      }
+                      await page.click(action.selector, { force: true });
                       await page.waitForTimeout(action.waitAfter || 500);
                       break;
                     case 'type':
                       await page.fill(action.selector, action.text);
                       await page.waitForTimeout(action.waitAfter || 300);
+                      break;
+                    case 'scroll':
+                      await page.evaluate((options) => {
+                        window.scrollBy(options.x || 0, options.y || 0);
+                      }, { x: action.x || 0, y: action.y || 0 });
+                      await page.waitForTimeout(action.waitAfter || 500);
                       break;
                     case 'wait':
                       await page.waitForTimeout(action.ms || 1000);
@@ -1226,12 +1280,32 @@ async function runReview(config) {
                       break;
                     }
                     case 'click':
-                      await videoPage.click(action.selector);
+                      // Add visual indicator for click
+                      if (config.showCursor) {
+                        await videoPage.evaluate((selector) => {
+                          const el = document.querySelector(selector);
+                          if (el) {
+                            el.style.outline = '3px solid #007AFF';
+                            el.style.outlineOffset = '2px';
+                            setTimeout(() => {
+                              el.style.outline = '';
+                              el.style.outlineOffset = '';
+                            }, 500);
+                          }
+                        }, action.selector);
+                      }
+                      await videoPage.click(action.selector, { force: true });
                       await videoPage.waitForTimeout(action.waitAfter || 500);
                       break;
                     case 'type':
                       await videoPage.fill(action.selector, action.text);
                       await videoPage.waitForTimeout(action.waitAfter || 300);
+                      break;
+                    case 'scroll':
+                      await videoPage.evaluate((options) => {
+                        window.scrollBy(options.x || 0, options.y || 0);
+                      }, { x: action.x || 0, y: action.y || 0 });
+                      await videoPage.waitForTimeout(action.waitAfter || 500);
                       break;
                     case 'wait':
                       await videoPage.waitForTimeout(action.ms || 1000);
@@ -1319,12 +1393,32 @@ async function runReview(config) {
                     break;
                   }
                   case 'click':
-                    await page.click(action.selector);
+                    // Add visual indicator for click
+                    if (config.showCursor) {
+                      await page.evaluate((selector) => {
+                        const el = document.querySelector(selector);
+                        if (el) {
+                          el.style.outline = '3px solid #007AFF';
+                          el.style.outlineOffset = '2px';
+                          setTimeout(() => {
+                            el.style.outline = '';
+                            el.style.outlineOffset = '';
+                          }, 500);
+                        }
+                      }, action.selector);
+                    }
+                    await page.click(action.selector, { force: true });
                     await page.waitForTimeout(action.waitAfter || 500);
                     break;
                   case 'type':
                     await page.fill(action.selector, action.text);
                     await page.waitForTimeout(action.waitAfter || 300);
+                    break;
+                  case 'scroll':
+                    await page.evaluate((options) => {
+                      window.scrollBy(options.x || 0, options.y || 0);
+                    }, { x: action.x || 0, y: action.y || 0 });
+                    await page.waitForTimeout(action.waitAfter || 500);
                     break;
                   case 'wait':
                     await page.waitForTimeout(action.ms || 1000);
@@ -1567,8 +1661,8 @@ function validateConfig(config) {
     }
   }
 
-  if (config.videoFormat && !['gif', 'webm'].includes(config.videoFormat)) {
-    throw new Error('videoFormat must be either "gif" or "webm"');
+  if (config.videoFormat && !['slideshow', 'gif', 'webm'].includes(config.videoFormat)) {
+    throw new Error('videoFormat must be "slideshow", "gif", or "webm"');
   }
 
   if (config.gifQuality && !['low', 'medium', 'high'].includes(config.gifQuality)) {
