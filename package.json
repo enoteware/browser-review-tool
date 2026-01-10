@@ -51,12 +51,13 @@
     "PACKAGE_SUMMARY.md"
   ],
   "dependencies": {
-    "@playwright/test": "^1.54.1",
     "@ai-sdk/openai": "^1.0.0",
+    "@playwright/test": "^1.54.1",
     "ai": "^3.4.0",
     "dotenv": "^16.4.5"
   },
   "devDependencies": {
+    "@neondatabase/serverless": "^1.0.2",
     "@types/node": "^20.11.17",
     "eslint": "^8.57.0",
     "eslint-config-prettier": "^10.1.8",
